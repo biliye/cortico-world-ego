@@ -1,0 +1,25 @@
+{
+  "name": "cortico-world-ego",
+  "version": "0.1.0",
+  "type": "module",
+  "author": { "name": "筆離嘢" },
+  "description": "Ego Lite 浏览器 World：Cortico 与 Coopanion 共用官方 ego-browser 接口，在独立 Space 中浏览网页、点击填表、截图，以及观看 HTML5 / B 站视频的画面与字幕。需先安装 Ego Lite。",
+  "license": "MIT",
+  "keywords": ["cortico-world", "cortico", "ego", "browser", "video", "bilibili"],
+  "engines": { "node": ">=22" },
+  "os": ["win32", "darwin"],
+  "main": "./src/index.ts",
+  "cortico": {
+    "kind": "world", "api": 6, "displayName": "Ego 浏览器", "icon": "assets/icon.svg",
+    "tags": ["internet", "browser", "video", "external-setup", "high-cost"],
+    "locales": { "en": { "displayName": "Ego Browser", "description": "Ego Lite browser for Cortico and Coopanion: isolated task spaces, browsing, screenshots, HTML5/Bilibili video frames and subtitles. Requires an installed Ego Lite and ego-browser CLI." } },
+    "describe": "describe.json", "webUiClient": "dist/webui.js"
+  },
+  "files": ["src", "dist", "assets", "README.md", "describe.json", "CHANGELOG.md", "LICENSE"],
+  "scripts": {
+    "typecheck": "tsc --noEmit", "test": "vitest run", "build:webui": "node scripts/build-webui.mjs",
+    "smoke": "node --import ./scripts/register.mjs --experimental-transform-types scripts/smoke.ts",
+    "prepack": "node scripts/build-webui.mjs", "prepublishOnly": "pnpm typecheck && pnpm test"
+  },
+  "devDependencies": { "@types/node": "^22.10.0", "typescript": "^5.7.2", "vitest": "^2.1.8", "esbuild": "^0.24.0" }
+}

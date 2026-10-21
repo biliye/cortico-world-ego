@@ -113,13 +113,13 @@ async function runVideo(task, page, args) {
     if (args.frameId) throw new Error('Video frame no longer exists or contains no matching video. Inspect again without frameId.');
     return { found: false, message: 'No HTML5 video found in accessible frames. The player may still be loading or use a different media surface.' };
   }
-  if (args.action === 'look' && !state.image) {
+  if ((args.action === 'look' || state.batchComplete) && !state.samplePending && !state.image) {
     const shot = await capturePage(task, page, args);
     state.image = shot.image; state.restoredWindow = shot.restoredWindow;
     state.capture = 'viewport-fallback';
     state.captureNote = 'Video pixels could not be read (CORS/DRM/not ready). This image is the page viewport at capture time; it may not show the video.';
   }
-  if (args.action === 'look' && /(^|\.)bilibili\.com$/.test(new URL(await page.url()).hostname)) {
+  if ((args.action === 'look' || state.batchComplete) && !state.samplePending && /(^|\.)bilibili\.com$/.test(new URL(await page.url()).hostname)) {
     const range = { time: state.time, since: args.since <= state.time ? args.since : Math.max(0, state.time - 15) };
     try { state.bilibili = await page.evaluate(bilibiliSubtitles, range); }
     catch (error) { if (errorCode(error)?.startsWith('EGO_TASK_') || error.mayHaveLateEffects) throw error; state.subtitleError = error.message; }

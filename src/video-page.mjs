@@ -32,9 +32,11 @@ export async function videoOperation(args) {
   } else if (args.action === 'exit') clear();
   const time = v.currentTime;
   if (time < cache.lastTime) clear();
+  const batchComplete = args.collecting && Number.isFinite(args.batchEndTime) && time >= args.batchEndTime - 0.02;
+  const action = batchComplete && args.action === 'sample' ? 'look' : args.action;
   const since = args.since <= time ? args.since : Math.max(0, time - 15);
   const tracks = [];
-  for (const track of args.action === 'sample' ? [] : v.textTracks) {
+  for (const track of action === 'sample' ? [] : v.textTracks) {
     // Hidden loads cues without changing which subtitle track is drawn on screen.
     if (track.mode === 'disabled') track.mode = 'hidden';
     tracks.push({ language: track.language, label: track.label, kind: track.kind,
@@ -42,13 +44,17 @@ export async function videoOperation(args) {
         .slice(-100).map(c => ({ from: c.startTime, to: c.endTime, text: String(c.text ?? '').slice(0, 2000) })) });
   }
   const result = { found: true, count: videos.length, time, duration: Number.isFinite(v.duration) ? v.duration : null,
-    paused: v.paused, ended: v.ended, readyState: v.readyState, width: v.videoWidth, height: v.videoHeight,
+    paused: v.paused, ended: v.ended, playbackRate: v.playbackRate, readyState: v.readyState, width: v.videoWidth, height: v.videoHeight,
     source: v.currentSrc, tracks, capture: null, image: null };
   // Hold the playhead while the host assembles/enriches a watched scene.
-  if (args.action === 'look' && args.holdPlayback && !v.paused && !v.ended) {
+  if (args.collecting && Number.isFinite(args.targetTime) && time < args.targetTime - 0.02 && !v.ended) {
+    result.samplePending = true; return result;
+  }
+  if (batchComplete) result.batchComplete = true;
+  if (action === 'look' && (args.holdPlayback || batchComplete) && !v.paused && !v.ended) {
     v.pause(); result.playbackHeld = true;
   }
-  if (args.action === 'look' || args.action === 'sample') {
+  if (action === 'look' || action === 'sample') {
     if (v.readyState < 2 || !v.videoWidth) result.captureNote = 'Video frame is not decoded yet.';
     else {
       try {
@@ -66,7 +72,7 @@ export async function videoOperation(args) {
         cache.lastTime = time;
         result.frameTimes = cache.frames.map(f => f.time); result.frameCount = cache.frames.length;
         result.capture = 'video-sample';
-        if (args.action === 'sample') return result;
+        if (action === 'sample') return result;
         const cols = Math.min(3, cache.frames.length), rows = Math.ceil(cache.frames.length / cols);
         const grid = document.createElement('canvas'); grid.width = cols * width; grid.height = rows * (height + 26);
         const g = grid.getContext('2d'); g.fillStyle = '#111'; g.fillRect(0, 0, grid.width, grid.height);
@@ -78,7 +84,7 @@ export async function videoOperation(args) {
         result.image = { base64: grid.toDataURL('image/jpeg', 0.75).split(',')[1], mime: 'image/jpeg' };
         result.capture = cache.frames.length > 1 ? 'video-mosaic' : 'video-frame'; result.frameTimes = cache.frames.map(f => f.time);
         // Keep the boundary frame as the start of the next observation window.
-        if (args.consumeFrames) cache.frames = cache.frames.slice(-1);
+        if (args.consumeFrames || batchComplete) cache.frames = cache.frames.slice(-1);
       } catch (error) { result.captureNote = `Video pixels unavailable: ${error.message}`; }
     }
   }

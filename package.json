@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-ego",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "type": "module",
   "author": { "name": "筆離嘢" },
   "description": "Ego 浏览器 —— 专为 AI 打造的浏览器 World，让你家的小肥鱼上网、看图、看视频更顺手。Cortico 与 Coopanion 共用官方 ego-browser 接口，在独立 Space 里开网页、点击填表、截图，观看 HTML5 / B 站视频的画面、字幕与弹幕。需先安装 Ego Lite。",
@@ -25,6 +25,7 @@
     "smoke:helper": "node --import ./scripts/register.mjs --experimental-transform-types scripts/smoke-helper.ts",
     "smoke:tail": "node --import ./scripts/register.mjs --experimental-transform-types scripts/smoke-short-tail.ts",
     "smoke:continuity": "node --import ./scripts/register.mjs --experimental-transform-types scripts/smoke-continuity.ts",
+    "smoke:sampling": "node --import ./scripts/register.mjs --experimental-transform-types scripts/smoke-sampling.ts",
     "prepack": "node scripts/build-webui.mjs", "prepublishOnly": "pnpm typecheck && pnpm test"
   },
   "devDependencies": { "@types/node": "^22.10.0", "typescript": "^5.7.2", "vitest": "^2.1.8", "esbuild": "^0.24.0" }

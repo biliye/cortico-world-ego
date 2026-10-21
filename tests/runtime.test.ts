@@ -77,3 +77,20 @@ it('still returns danmaku when the subtitle API fails and obeys the danmaku swit
   const off = await execute({ operation: 'video', args: { page: 'p1', action: 'look', danmaku: false } });
   expect(off.value.danmaku).toBeUndefined(); expect(evaluate).toHaveBeenCalledTimes(1);
 });
+it('does not screenshot or enrich an early video-time poll', async () => {
+  page.url = async () => 'https://www.bilibili.com/video/BVfixture'; page.evaluate = vi.fn(); page.screenshot = vi.fn();
+  const original = page.cdp;
+  page.cdp = (method: string, params: any) => method === 'Runtime.evaluate'
+    ? { result: { value: { found: true, time: 3, samplePending: true, image: null } } } : original(method, params);
+  const result = await execute({ operation: 'video', args: { page: 'p1', action: 'look', targetTime: 5 } });
+  expect(result.value.samplePending).toBe(true); expect(page.screenshot).not.toHaveBeenCalled(); expect(page.evaluate).not.toHaveBeenCalled();
+});
+it('enriches a late intermediate sample that completed its batch using the actual batch range', async () => {
+  page.url = async () => 'https://www.bilibili.com/video/BVfixture'; page.evaluate = vi.fn(async () => ({ subtitles: [] }));
+  const original = page.cdp;
+  page.cdp = (method: string, params: any) => method === 'Runtime.evaluate'
+    ? { result: { value: { found: true, time: 25, batchComplete: true, image: { base64: 'anBlZw==', mime: 'image/jpeg' } } } } : original(method, params);
+  const result = await execute({ operation: 'video', args: { page: 'p1', action: 'sample', since: 5, danmaku: false } });
+  expect(result.value.bilibili).toEqual({ subtitles: [] });
+  expect(page.evaluate).toHaveBeenCalledWith(expect.any(Function), { time: 25, since: 5 });
+});

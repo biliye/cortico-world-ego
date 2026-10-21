@@ -1,6 +1,7 @@
 export interface EgoPanelStatus {
   running: boolean; connected: boolean; halted: boolean; reason: string; code?: string;
   spaceId?: number; spaceName: string; watching: string | null; spaceMissing?: boolean;
+  sampling?: { batch: number; current: { windowSec: number; frameIntervalSec: number; plannedFrames: number }; pending: { windowSec: number; frameIntervalSec: number; plannedFrames: number } | null } | null;
   connectionMode: 'auto' | 'direct' | 'helper'; transport: 'direct' | 'helper';
   helperOnline: boolean; helperDir: string; launcherFile: string; canPrepareHelper: boolean;
 }

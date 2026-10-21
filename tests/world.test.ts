@@ -15,11 +15,14 @@ class Browser implements EgoBridge {
   next?: BridgeReceipt;
   time = 10;
   ended = false;
+  updatedAt = Date.now();
   async run(op: string, args: Record<string, unknown>): Promise<BridgeReceipt> {
     this.calls.push({ op, args });
     if (this.next) { const next = this.next; this.next = undefined; return next; }
-    if (op === 'video') { const time = this.time++; return { spaceId: 1, value: { found: true, time, source: 'video1', frameId: 'frame1', ended: this.ended, paused: this.ended || args.action === 'pause',
-      ...(args.action === 'look' ? { capture: 'video-mosaic', frameTimes: [time], image: { base64: Buffer.from('jpeg').toString('base64'), mime: 'image/jpeg' } } : {}) } }; }
+    if (op === 'video') { if (!this.ended) this.time += (Date.now() - this.updatedAt) / 1000; this.updatedAt = Date.now(); const time = this.time;
+      const samplePending = typeof args.targetTime === 'number' && time < args.targetTime - 0.02 && !this.ended;
+      return { spaceId: 1, value: { found: true, time, playbackRate: 1, source: 'video1', frameId: 'frame1', ended: this.ended, paused: this.ended || args.action === 'pause', samplePending,
+      ...(args.action === 'look' && !samplePending ? { capture: 'video-mosaic', frameTimes: [time], image: { base64: Buffer.from('jpeg').toString('base64'), mime: 'image/jpeg' } } : {}) } }; }
     return { spaceId: 1, value: op === 'read' ? 'abcdefghij' : { page: 'p1', op } };
   }
 }
@@ -38,6 +41,95 @@ beforeEach(async () => {
   events = []; deferred = []; browser = new Browser(); cfg = structuredClone(EGO_DEFAULTS);
   world = new EgoWorld({ cfg, dataDir: dir, botDir: dir, timezone: 'Asia/Shanghai', bridge: browser });
   await world.start(host());
+});
+
+describe('per-watch video-time sampling', () => {
+  async function advance(ms: number) {
+    while (ms > 0) { const step = Math.min(ms, 1000); await vi.advanceTimersByTimeAsync(step); await (world as any).queue; ms -= step; }
+  }
+  function videoFixture(rate = 1) {
+    let updatedAt = Date.now();
+    const state = { stalled: false };
+    const video = { tagName: 'VIDEO', currentSrc: 'video1', currentTime: 0, readyState: 4, videoWidth: 640, videoHeight: 360,
+      duration: 600, paused: true, ended: false, playbackRate: rate, textTracks: [],
+      play() { this.paused = false; }, pause() { this.paused = true; } };
+    const operation = runInNewContext(`(${videoOperation.toString()})`, { Date, Image: class { async decode() {} }, document: {
+      querySelectorAll: () => [video], createElement: () => ({ getContext: () => ({ drawImage() {}, fillRect() {}, fillText() {} }),
+        toDataURL: () => 'data:image/jpeg;base64,anBlZw==' }),
+    } });
+    browser.run = async (op, args) => {
+      browser.calls.push({ op, args });
+      if (!video.paused && !state.stalled) video.currentTime += (Date.now() - updatedAt) / 1000 * video.playbackRate;
+      updatedAt = Date.now();
+      return { value: { ...await operation(args), frameId: 'frame1' } };
+    };
+    return { video, state };
+  }
+  async function batch(index: number) {
+    const rendered = await deferred[index]!.render();
+    if (!rendered || typeof rendered === 'string') throw new Error('Missing scene');
+    return JSON.parse(rendered.text.slice(rendered.text.indexOf('\n', rendered.text.indexOf('totalChars=')) + 1));
+  }
+  it('tunes at the next batch without losing queued mosaics or the previous tail frame', async () => {
+    vi.useFakeTimers(); videoFixture();
+    await call('video', { page: 'p1', action: 'watch', windowSec: 20, frameIntervalSec: 10 });
+    await advance(10000);
+    const tune = await call('video', { page: 'p1', action: 'tune', windowSec: 10, frameIntervalSec: 5 });
+    expect(tune.failed).toBeUndefined(); expect(tune.text).toContain('"appliesAtBatch":2');
+    expect(world.status().sampling).toMatchObject({ batch: 1, current: { windowSec: 20 }, pending: { windowSec: 10 } });
+    await advance(10000); await advance(10000);
+    expect(deferred).toHaveLength(2);
+    const first = await batch(0), second = await batch(1);
+    expect(first.frameTimes).toEqual([0, 10, 20]); expect(second.frameTimes).toEqual([20, 25, 30]);
+    expect(first.observation).toMatchObject({ batch: 1, windowSec: 20, plannedFrames: 3, maxActualGapSec: 10, actualVideoSpanSec: 20 });
+    expect(second.observation).toMatchObject({ batch: 2, windowSec: 10, plannedFrames: 3 });
+    expect(cfg).toEqual(EGO_DEFAULTS);
+    await call('video', { page: 'p1', action: 'watch' });
+    expect(world.status().sampling?.current).toEqual({ windowSec: 15, frameIntervalSec: 5, plannedFrames: 4 });
+  });
+  it('freezes defaults and frame size until the batch boundary, then applies hot configuration', async () => {
+    vi.useFakeTimers(); videoFixture(); await call('video', { page: 'p1', action: 'watch' });
+    await advance(5000); cfg.video.intervalMs = 20000; cfg.video.maxFrames = 3; cfg.video.frameWidth = 320;
+    expect(world.status().sampling).toMatchObject({ current: { windowSec: 15, plannedFrames: 4 }, pending: { windowSec: 20, plannedFrames: 3 } });
+    await advance(10000); await advance(20000);
+    expect((await batch(0)).frameTimes).toEqual([0, 5, 10, 15]); expect((await batch(1)).frameTimes).toEqual([15, 25, 35]);
+    const captures = browser.calls.filter(c => ['sample', 'look'].includes(String(c.args.action)));
+    expect(captures.filter(c => Number(c.args.since ?? 0) < 15).every(c => c.args.frameWidth === 640)).toBe(true);
+    expect(captures.filter(c => Number(c.args.since ?? 0) >= 15).every(c => c.args.frameWidth === 320)).toBe(true);
+  });
+  it('keeps a watch override ahead of hot defaults and preserves collection after invalid requests', async () => {
+    vi.useFakeTimers(); videoFixture(); await call('video', { page: 'p1', action: 'watch', windowSec: 20, frameIntervalSec: 10 });
+    cfg.video.intervalMs = 10000; cfg.video.maxFrames = 9;
+    const count = browser.calls.length;
+    for (const args of [
+      { page: 'p1', action: 'watch', windowSec: 2, frameIntervalSec: 1 },
+      { page: 'p1', action: 'tune', windowSec: 20, frameIntervalSec: 1 },
+      { page: 'p2', action: 'tune', windowSec: 20, frameIntervalSec: 10 },
+      { page: 'p1', action: 'tune', windowSec: 20 },
+    ]) expect((await call('video', args)).failed).toBe(true);
+    expect(browser.calls).toHaveLength(count);
+    await advance(40000); expect(deferred).toHaveLength(2);
+    expect((await batch(0)).frameTimes).toEqual([0, 10, 20]); expect((await batch(1)).frameTimes).toEqual([20, 30, 40]);
+    await call('video', { page: 'p1', action: 'pause' });
+    expect((await call('video', { page: 'p1', action: 'tune', windowSec: 20, frameIntervalSec: 10 })).failed).toBe(true);
+  });
+  it('uses video seconds at double speed and includes a shorter final interval', async () => {
+    vi.useFakeTimers(); videoFixture(2);
+    await call('video', { page: 'p1', action: 'watch', windowSec: 20, frameIntervalSec: 6 });
+    await advance(9999); expect(deferred).toHaveLength(0);
+    await advance(1); expect((await batch(0)).frameTimes).toEqual([0, 6, 12, 18, 20]);
+  });
+  it('does not fill a stalled batch with duplicate timestamps and reports gaps when targets are missed', async () => {
+    vi.useFakeTimers(); const { state, video } = videoFixture();
+    await call('video', { page: 'p1', action: 'watch', windowSec: 10, frameIntervalSec: 2 });
+    state.stalled = true; await advance(6000); expect(deferred).toHaveLength(0);
+    expect(browser.calls.filter(c => c.args.action === 'sample').length).toBeGreaterThan(1);
+    // A delayed observation sees the playhead past several targets; there is no historical reconstruction.
+    state.stalled = false; video.currentTime = 6; await advance(4000);
+    const result = await batch(0);
+    expect(result.frameTimes).toEqual([0, 8, 10]);
+    expect(result.frameCount).toBe(3); expect(result.observation).toMatchObject({ plannedFrames: 6, maxActualGapSec: 8 });
+  });
 });
 afterEach(async () => { vi.useRealTimers(); await world.stop(); if (!dir.startsWith(join(process.cwd(), '.test-data-'))) throw new Error('Unsafe test cleanup path'); await rm(dir, { recursive: true, force: true }); });
 
@@ -184,7 +276,7 @@ describe('video observation lifetime', () => {
     await call('navigate', { page: 'p1', url: 'https://example.com' }); expect(deferred[0].render()).toBe(null);
   });
   it('withdraws a queued final scene if the operator pauses before delivery', async () => {
-    vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' }); browser.ended = true;
+    vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' }); browser.time += 1; browser.ended = true;
     await advance(5000); expect(deferred).toHaveLength(1); expect(deferred[0].render()).not.toBe(null);
     await call('video', { page: 'p1', action: 'pause' }); expect(deferred[0].render()).toBe(null);
   });
@@ -219,9 +311,9 @@ describe('video observation lifetime', () => {
   it('with one frame configured captures only at the delivery interval', async () => {
     cfg.video.maxFrames = 1; vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });
     const start = browser.calls.length;
-    await advance(14999); expect(browser.calls).toHaveLength(start);
+    await advance(14999); expect(deferred).toHaveLength(0);
     await advance(1);
-    expect(browser.calls.slice(start).map(c => c.args.action)).toEqual(['look']);
+    expect(browser.calls.slice(start).every(c => c.args.action === 'look')).toBe(true); expect(deferred).toHaveLength(1);
   });
   it('returns real image bytes as an attachment instead of base64 in context text', async () => {
     const result = await call('video', { page: 'p1', action: 'look' });

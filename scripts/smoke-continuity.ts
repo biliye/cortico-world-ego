@@ -16,7 +16,7 @@ const server = createServer((_req, res) => {
 const c=document.createElement('canvas');c.width=640;c.height=360;const g=c.getContext('2d');let n=0;
 const draw=setInterval(()=>{g.fillStyle=['#137464','#783dc7','#a33745','#2859ba'][Math.floor(n/4)%4];g.fillRect(0,0,640,360);g.fillStyle='#fff';g.font='36px sans-serif';g.fillText('NINE FRAMES '+n++,32,180);},50);
 const chunks=[],rec=new MediaRecorder(c.captureStream(20),{mimeType:'video/webm'});rec.ondataavailable=e=>chunks.push(e.data);
-rec.onstop=()=>{clearInterval(draw);const v=document.querySelector('video');v.src=URL.createObjectURL(new Blob(chunks,{type:'video/webm'}));v.playbackRate=0.1;v.play().then(()=>window.fixtureReady=true);};rec.start();setTimeout(()=>rec.stop(),4500);
+rec.onstop=()=>{clearInterval(draw);const v=document.querySelector('video');v.src=URL.createObjectURL(new Blob(chunks,{type:'video/webm'}));v.play().then(()=>{v.pause();window.fixtureReady=true;});};rec.start();setTimeout(()=>rec.stop(),34000);
 </script>`);
 });
 await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
@@ -47,8 +47,13 @@ try {
   await world.start(host); assert(world.status().connected, JSON.stringify(world.status()));
   console.log(JSON.stringify({ spaceId: world.status().spaceId, spaceName: cfg.spaceName }));
   const page = data(await call('open', { url: `http://127.0.0.1:${(server.address() as any).port}/` })).page;
-  const ready = await bridge.run('evaluate', { spaceId: world.status().spaceId, page, expression: `(async()=>{const end=Date.now()+12000;while(Date.now()<end){if(window.fixtureReady&&document.querySelector('video').readyState>=2)return true;await new Promise(r=>setTimeout(r,100));}throw new Error('fixture not ready')})()` });
-  assert(!ready.error, ready.error); assert.equal(ready.value, true);
+  let ready = false; const readyDeadline = Date.now() + 45000;
+  while (!ready && Date.now() < readyDeadline) {
+    const result = await bridge.run('evaluate', { spaceId: world.status().spaceId, page, expression: 'Boolean(window.fixtureReady && document.querySelector("video").readyState >= 2)' });
+    assert(!result.error, result.error); ready = result.value === true;
+    if (!ready) await new Promise(r => setTimeout(r, 1000));
+  }
+  assert(ready, 'fixture not ready');
   const start = await call('video', { page, action: 'watch' });
   assert(!start.blobs?.length); assert.equal(data(start).observation.phase, 'collecting'); assert.equal(scenes.length, 0);
   evidence.collecting = data(start);
@@ -65,7 +70,7 @@ try {
   assert.equal(batches[0].frameTimes.at(-1), batches[1].frameTimes[0]);
   for (const batch of batches) {
     const gaps = batch.frameTimes.slice(1).map((t: number, i: number) => t - batch.frameTimes[i]);
-    assert(gaps.every((gap: number) => gap > 0 && gap < 0.7), `Sampling gap: ${JSON.stringify(gaps)}`);
+    assert(gaps.every((gap: number) => gap > 0 && gap < 2.5), `Sampling gap: ${JSON.stringify(gaps)}`);
   }
   evidence.batches = batches;
   await call('video', { page, action: 'pause' }); assert.equal(await scenes[0].render(), null);

@@ -4,6 +4,8 @@ export default { panels: { control: { mount } } } satisfies WebUiClientBundle;
 export function mount(ctx: WebUiPanelContext): void {
   const ui = ctx.ui, zh = ctx.language.startsWith('zh');
   const say = (cn: string, en: string) => zh ? cn : en;
+  const samplingText = (plan: { windowSec: number; frameIntervalSec: number; plannedFrames: number }) =>
+    `${say('窗口', 'Window')} ${plan.windowSec}s · ${say('帧距', 'Gap')} ${Number(plan.frameIntervalSec.toFixed(3))}s · ${plan.plannedFrames}${say(' 帧', ' frames')}`;
   const connection = ui.sheet({ title: say('浏览器连接', 'Browser connection') });
   const heading = ui.h('h3', null, say('正在读取状态…', 'Reading status…'));
   heading.setAttribute('role', 'status');
@@ -41,6 +43,10 @@ export function mount(ctx: WebUiPanelContext): void {
       { k: say('连接通道', 'Connection'), v: status.transport === 'helper' ? say('普通权限助手', 'Ordinary-permission helper') : say('直接连接', 'Direct') },
       { k: 'Space', v: status.spaceId ? `${status.spaceName} (#${status.spaceId})` : say('连接后创建', 'Created after connection') },
       { k: say('视频观看', 'Video'), v: status.watching || say('未在观看', 'Not watching') },
+      ...(status.sampling ? [
+        { k: say('本批采样', 'Current sampling'), v: samplingText(status.sampling.current) },
+        ...(status.sampling.pending ? [{ k: say('下一批采样', 'Next sampling'), v: samplingText(status.sampling.pending) }] : []),
+      ] : []),
     ]));
     actions.replaceChildren();
     if (view.canConnect) actions.append(button(say('连接浏览器', 'Connect browser'), 'connect', true));

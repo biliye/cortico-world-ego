@@ -63,3 +63,16 @@ it('does not let an explicit look evict samples from the active watch batch', as
   await f.capture(5, 'sample', options); await f.capture(10, 'sample', options);
   expect((await f.capture(15, 'look', { ...options, consumeFrames: true })).frameTimes).toEqual([0, 5, 10, 15]);
 });
+it('polls before a video-time target without capturing or consuming the shared boundary', async () => {
+  const f = fixture(); await f.capture(0, 'sample', { collecting: true });
+  const pending = await f.capture(3, 'look', { collecting: true, targetTime: 5, consumeFrames: true, holdPlayback: true });
+  expect(pending.samplePending).toBe(true); expect(pending.image).toBe(null); expect(f.video.paused).toBe(false);
+  expect((await f.capture(5, 'look', { collecting: true, targetTime: 5, consumeFrames: true })).frameTimes).toEqual([0, 5]);
+});
+it('flushes a late intermediate sample at the batch endpoint and holds playback for enrichment', async () => {
+  const f = fixture(); await f.capture(0, 'sample', { collecting: true });
+  const scene = await f.capture(20, 'sample', { collecting: true, targetTime: 5, batchEndTime: 20 });
+  expect(scene.batchComplete).toBe(true); expect(scene.playbackHeld).toBe(true); expect(scene.image.mime).toBe('image/jpeg');
+  expect(scene.frameTimes).toEqual([0, 20]);
+  expect((await f.capture(25, 'sample', { collecting: true })).frameTimes).toEqual([20, 25]);
+});

@@ -12,10 +12,12 @@ class Browser implements EgoBridge {
   calls: Array<{ op: string; args: Record<string, unknown> }> = [];
   next?: BridgeReceipt;
   time = 10;
+  ended = false;
   async run(op: string, args: Record<string, unknown>): Promise<BridgeReceipt> {
     this.calls.push({ op, args });
     if (this.next) { const next = this.next; this.next = undefined; return next; }
-    if (op === 'video') return { spaceId: 1, value: { found: true, time: this.time++, source: 'video1', frameId: 'frame1', paused: args.action === 'pause', image: args.action === 'look' ? { base64: Buffer.from('jpeg').toString('base64'), mime: 'image/jpeg' } : undefined } };
+    if (op === 'video') { const time = this.time++; return { spaceId: 1, value: { found: true, time, source: 'video1', frameId: 'frame1', ended: this.ended, paused: this.ended || args.action === 'pause',
+      ...(args.action === 'look' ? { capture: 'video-mosaic', frameTimes: [time], image: { base64: Buffer.from('jpeg').toString('base64'), mime: 'image/jpeg' } } : {}) } }; }
     return { spaceId: 1, value: op === 'read' ? 'abcdefghij' : { page: 'p1', op } };
   }
 }
@@ -163,6 +165,42 @@ describe('video observation lifetime', () => {
   async function advance(ms: number) {
     while (ms > 0) { const step = Math.min(ms, 1000); await vi.advanceTimersByTimeAsync(step); await (world as any).queue; ms -= step; }
   }
+  it('identifies the initial preview and explains that look does not collect a time window', async () => {
+    const peek = await call('video', { page: 'p1', action: 'look' });
+    expect(peek.text).toContain('"capture":"video-frame"'); expect(peek.text).toContain('"phase":"snapshot"'); expect(peek.text).toContain('does not wait');
+    const start = await call('video', { page: 'p1', action: 'watch' });
+    expect(start.text).toContain('"phase":"collecting"'); expect(start.text).toContain('"nextEvent":"ego.video.scene"'); expect(start.text).toContain('"frameCount":1');
+  });
+  it('flushes a short final scene before 15 seconds, stops watching and leaves the scene deliverable', async () => {
+    vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });
+    await advance(5000); browser.ended = true;
+    await advance(5000); expect(world.status().watching).toBe(null); expect(deferred).toHaveLength(1);
+    const final = await deferred[0].render(); expect(final && typeof final !== 'string' && final.blobs).toHaveLength(1);
+    expect(final && typeof final !== 'string' && final.text).toContain('"phase":"ended"');
+    const count = browser.calls.length; await advance(60000); expect(browser.calls).toHaveLength(count);
+    await call('navigate', { page: 'p1', url: 'https://example.com' }); expect(deferred[0].render()).toBe(null);
+  });
+  it('withdraws a queued final scene if the operator pauses before delivery', async () => {
+    vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' }); browser.ended = true;
+    await advance(5000); expect(deferred).toHaveLength(1); expect(deferred[0].render()).not.toBe(null);
+    await call('video', { page: 'p1', action: 'pause' }); expect(deferred[0].render()).toBe(null);
+  });
+  it('does not discard the last queued scene if playback ends without advancing past its final timestamp', async () => {
+    vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' }); await advance(15000);
+    expect(deferred).toHaveLength(1);
+    const time = (world as any).watch.since;
+    browser.ended = true; browser.time = time;
+    browser.next = { spaceId: 1, value: { found: true, time, source: 'video1', ended: true, paused: true } };
+    await advance(5000);
+    expect(world.status().watching).toBe(null); expect(deferred).toHaveLength(1); expect(deferred[0].render()).not.toBe(null);
+  });
+  it('keeps frame times in the header and image fallback even when long subtitles are truncated', async () => {
+    cfg.maxChars = 100;
+    browser.next = { spaceId: 1, value: { found: true, tracks: [{ text: '字幕'.repeat(10000) }], capture: 'video-mosaic', frameTimes: [1, 6, 11, 16], image: { base64: 'anBlZw==', mime: 'image/jpeg' } } };
+    const result = await call('video', { page: 'p1', action: 'look' });
+    expect(result.text.split('\n')[0]).toContain('frameCount=4 frameTimes=[1,6,11,16]'); expect(result.text).toContain('truncated=true');
+    expect((result.blobs![0] as any).fallbackText).toContain('frameTimes=[1,6,11,16]');
+  });
   it('samples four frames within each 15-second scene and sends only the mosaic', async () => {
     vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });
     const start = browser.calls.length;

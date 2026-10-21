@@ -24,7 +24,7 @@ export const EGO: WorldDefinition<EgoConfigSection> = {
       ego_shot: { zh: '获取网页当前视口的图片附件。', en: 'Capture the page viewport as an attachment.' },
       ego_close: { zh: '关闭 bot 创建的页面。', en: 'Close an agent-created page.' },
       ego_handoff: { zh: '将 Space 交给操作员并停止操作。', en: 'Hand control to the operator and stop commands.' },
-      ego_video: { zh: '控制视频，按段合成多帧拼图，读取字幕与 B 站弹幕文字。', en: 'Control videos, assemble interval mosaics, read subtitles and Bilibili danmaku text.' },
+      ego_video: { zh: 'look 取当前画面；watch 按段采多帧合一图，读取字幕与 B 站弹幕文字。', en: 'look captures now; watch samples interval mosaics with subtitles and Bilibili danmaku text.' },
       ego_bilibili: { zh: '搜索 B 站视频、查看推荐与评论。', en: 'Search Bilibili, list related videos and comments.' },
     }),
     events: [

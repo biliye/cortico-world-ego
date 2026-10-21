@@ -17,7 +17,7 @@ it('assembles samples from one interval and retains only its boundary for the ne
   await f.capture(0, 'look'); await f.capture(5); const sample = await f.capture(10);
   expect(sample.image).toBe(null); expect(sample.frameTimes).toEqual([0, 5, 10]);
   const first = await f.capture(15, 'look', { consumeFrames: true });
-  expect(first.frameTimes).toEqual([0, 5, 10, 15]); expect(first.image.mime).toBe('image/jpeg');
+  expect(first.frameTimes).toEqual([0, 5, 10, 15]); expect(first.image.mime).toBe('image/jpeg'); expect(first.capture).toBe('video-mosaic'); expect(first.frameCount).toBe(4);
   await f.capture(20); await f.capture(25);
   expect((await f.capture(30, 'look', { consumeFrames: true })).frameTimes).toEqual([15, 20, 25, 30]);
 });
@@ -31,5 +31,5 @@ it('does not retain stale frames after stalled polling, backward seek, pause or 
 it('still captures a paused frame after the previous wall-clock window has expired', async () => {
   const f = fixture(); await f.capture(0, 'look');
   const scene = await f.capture(0, 'look', {}, 40);
-  expect(scene.frameTimes).toEqual([0]); expect(scene.image.mime).toBe('image/jpeg');
+  expect(scene.frameTimes).toEqual([0]); expect(scene.image.mime).toBe('image/jpeg'); expect(scene.capture).toBe('video-frame'); expect(scene.frameCount).toBe(1);
 });

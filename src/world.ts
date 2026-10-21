@@ -13,7 +13,7 @@ import { prepareHelperLauncher } from './helper-launcher.ts';
 import { isConnectionFailure, normalizeFailure } from './failures.ts';
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 const STOP_CODES = /EGO_TASK_SPACE_(USER_IN_CONTROL|INACTIVE|NAME_IN_USE|NOT_FOUND|NOT_SELECTED|UNAVAILABLE)|EGO_TASK_HOST_DISCONNECTED/;
-interface Watch { page: string; frameId?: string; selector?: string; index?: number; since?: number; source?: string; generation: number; nextSceneAt: number }
+interface Watch { page: string; frameId?: string; selector?: string; index?: number; since?: number; source?: string; generation: number; nextSceneAt: number; completed?: boolean }
 interface SavedState { spaceId?: number; halted: boolean; reason: string; code?: string; spaceMissing?: boolean }
 export interface EgoWorldOptions {
   cfg: EgoConfigSection; timezone: string; dataDir: string; botDir: string; bridge?: EgoBridge;
@@ -38,7 +38,7 @@ export class EgoWorld implements World {
   private watch?: Watch;
   private generation = 0;
   private sceneToken = 0;
-  private pendingScene?: { token: number; outcome: ToolOutcome };
+  private pendingScene?: { token: number; page: string; outcome: ToolOutcome };
   constructor(private readonly options: EgoWorldOptions) {
     this.spaceName = options.cfg.spaceName || `Cortico-${createHash('sha256').update(options.botDir).digest('hex').slice(0, 12)}`;
     this.stateFile = join(options.dataDir, 'ego', 'space.json');
@@ -192,7 +192,7 @@ export class EgoWorld implements World {
   private async invokeTool(operation: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome> {
     const args = validate(operation, input);
     if (operation === 'handoff') return this.handoff();
-    if ((operation === 'close' || operation === 'navigate') && this.watch?.page === args.page) this.cancelWatch();
+    if ((operation === 'close' || operation === 'navigate') && (this.watch?.page === args.page || this.pendingScene?.page === args.page)) this.cancelWatch();
     if (operation !== 'video') {
       const value = await this.command(operation, args, signal);
       return this.outcome(value, operation === 'read' ? Number(args.offset ?? 0) : 0, Number(args.maxChars ?? this.options.cfg.maxChars));
@@ -203,18 +203,41 @@ export class EgoWorld implements World {
     const value = await this.command('video', { ...videoArgs, resetFrames: action === 'watch' || action === 'exit', action: action === 'watch' ? 'play' : action === 'exit' ? 'pause' : action }, signal);
     if (!value.found) return { text: `offset=0\n${JSON.stringify(value)}`, ...(action === 'inspect' ? {} : { failed: true as const }) };
     if (!['inspect', 'look'].includes(action)) await this.event('video.state', JSON.stringify({ page: args.page, action, time: value.time, paused: value.paused }), true);
-    if (action !== 'watch') return this.outcome(value);
+    if (action !== 'watch') {
+      if (action === 'look') value.observation = { phase: 'snapshot', watching: this.watch?.page === args.page,
+        note: 'look captures now; it does not wait to collect a time window. For several frames within 15 seconds, call watch once and wait for ego.video.scene. Repeated watch restarts sampling.' };
+      return this.outcome(value);
+    }
     const watch: Watch = { page: String(args.page), frameId: value.frameId, selector: args.selector as string | undefined, index: args.index as number | undefined,
       since: value.time, source: value.source, generation: this.generation, nextSceneAt: Date.now() + this.videoInterval() };
     this.watch = watch;
     const scene = await this.command('video', { ...videoArgs, action: 'look', frameId: value.frameId }, signal);
+    if (!scene.found || scene.paused || scene.ended || scene.source !== watch.source) {
+      this.cancelWatch(); scene.observation = { phase: scene.ended ? 'ended' : 'stopped', watching: false, note: 'Playback stopped before the first collection window. Only the actually captured frames are returned.' };
+      return this.outcome(scene);
+    }
     watch.since = scene.time;
     watch.nextSceneAt = Date.now() + this.videoInterval();
+    scene.observation = { phase: 'collecting', watching: true, intervalMs: this.videoInterval(), plannedFrames: this.videoCaptureOptions().maxFrames,
+      nextEvent: 'ego.video.scene', note: 'This is the initial preview, not the completed interval mosaic. Wait for ego.video.scene before describing the multi-frame observation; do not restart watch between samples.' };
     this.schedule(watch);
     return this.outcome(scene);
   }
   private videoInterval(): number { return bounded(this.options.cfg.video.intervalMs, 10000, 120000, 15000); }
   private videoCaptureOptions() { return { maxFrames: bounded(this.options.cfg.video.maxFrames, 1, 9, 4), frameWidth: bounded(this.options.cfg.video.frameWidth, 240, 1280, 640), windowMs: this.videoInterval(), danmaku: this.options.cfg.video.danmaku !== false }; }
+  private publishScene(watch: Watch, value: any, final = false): void {
+    value.observation = { phase: final ? 'ended' : 'scene', ...(final ? { watching: false } : {}), final, intervalMs: this.videoInterval(),
+      note: final ? 'Playback ended. These are the frames actually collected before the end; watching has stopped.' : 'Completed observation window. Use frameTimes in row-major order; the actual frame count can be below the configured maximum.' };
+    const token = ++this.sceneToken;
+    this.pendingScene = { token, page: watch.page, outcome: this.outcome(value) };
+    this.host?.pushDeferred({ type: 'ego.video.scene', origin: 'external', senderKey: this.id,
+      render: () => {
+        if (!this.running || (this.watch !== watch && !(watch.completed && this.watch === undefined)) || this.generation !== watch.generation || this.saved.halted || this.pendingScene?.token !== token) return null;
+        const outcome = this.pendingScene.outcome;
+        return { text: `page=${watch.page}\n${outcome.text}`, blobs: outcome.blobs };
+      },
+    }, { trigger: 'debounce' });
+  }
   private schedule(watch: Watch): void {
     if (!this.running || this.saved.halted || this.watch !== watch) return;
     this.timer = setTimeout(() => {
@@ -222,22 +245,24 @@ export class EgoWorld implements World {
         if (!this.running || this.watch !== watch || this.generation !== watch.generation || this.saved.halted) return;
         try {
           const observe = Date.now() >= watch.nextSceneAt;
-          const value = await this.command('video', { ...watch, ...this.videoCaptureOptions(), action: observe ? 'look' : 'sample', consumeFrames: observe });
+          let value = await this.command('video', { ...watch, ...this.videoCaptureOptions(), action: observe ? 'look' : 'sample', consumeFrames: observe });
           if (!this.running || this.watch !== watch || this.generation !== watch.generation) return;
-          if (!value.found || value.paused || value.ended || value.source !== watch.source) {
+          if (!value.found || (!value.ended && value.paused) || value.source !== watch.source) {
             this.cancelWatch(); await this.event('video.state', `Watching stopped: ${JSON.stringify({ page: watch.page, found: value.found, paused: value.paused, ended: value.ended, sourceChanged: value.source !== watch.source })}`, true); return;
+          }
+          if (value.ended) {
+            if (!observe) value = await this.command('video', { ...watch, ...this.videoCaptureOptions(), action: 'look', consumeFrames: true });
+            if (!this.running || this.watch !== watch || this.generation !== watch.generation) return;
+            if (!value.found || !value.ended || value.source !== watch.source) { this.cancelWatch(); return; }
+            // Natural completion keeps its last scene deliverable. Explicit cancellation still invalidates it.
+            watch.completed = true; this.watch = undefined; this.timer = undefined;
+            if (value.time !== watch.since) this.publishScene(watch, value, true);
+            await this.event('video.state', `Playback ended; final observation generated for page=${watch.page}.`, true);
+            return;
           }
           if (observe && value.time !== watch.since) {
             watch.since = value.time;
-            const token = ++this.sceneToken;
-            this.pendingScene = { token, outcome: this.outcome(value) };
-            this.host?.pushDeferred({ type: 'ego.video.scene', origin: 'external', senderKey: this.id,
-              render: () => {
-                if (!this.running || this.watch !== watch || this.generation !== watch.generation || this.saved.halted || this.pendingScene?.token !== token) return null;
-                const outcome = this.pendingScene.outcome;
-                return { text: `page=${watch.page}\n${outcome.text}`, blobs: outcome.blobs };
-              },
-            }, { trigger: 'debounce' });
+            this.publishScene(watch, value);
           }
           if (observe) watch.nextSceneAt = Date.now() + this.videoInterval();
           this.schedule(watch);
@@ -250,13 +275,18 @@ export class EgoWorld implements World {
   }
   private outcome(value: any, offset = 0, maxChars = this.options.cfg.maxChars): ToolOutcome {
     const image = value && typeof value === 'object' ? value.image : undefined;
-    const content = image ? { ...value, image: undefined } : value;
+    const frameTimes = Array.isArray(value?.frameTimes) ? value.frameTimes.filter((n: unknown) => typeof n === 'number' && Number.isFinite(n)).slice(0, 9) : undefined;
+    const capture = frameTimes?.length && /^video-(mosaic|frame)$/.test(value.capture ?? '') ? frameTimes.length > 1 ? 'video-mosaic' : 'video-frame' : value?.capture;
+    // Put frame metadata first and also in the untruncated header/attachment fallback.
+    const content = image ? { capture, frameCount: frameTimes?.length, frameTimes, observation: value.observation, ...value, image: undefined } : value;
+    if (image) { content.capture = capture; if (frameTimes) { content.frameCount = frameTimes.length; content.frameTimes = frameTimes; } }
     const text = typeof content === 'string' ? content : JSON.stringify(content) ?? 'null';
     offset = bounded(offset, 0, text.length, 0);
     const limit = bounded(maxChars, 100, 60000, 16000);
     const end = Math.min(text.length, offset + limit);
-    const result: ToolOutcome = { text: `offset=${offset} end=${end} totalChars=${text.length} truncated=${end < text.length}\n${text.slice(offset, end)}` };
-    if (image?.base64 && /^image\/(jpeg|png)$/.test(image.mime)) result.blobs = [{ bytes: Buffer.from(image.base64, 'base64'), mime: image.mime, name: 'ego-frame.jpg', fallbackText: `Ego image: ${value.capture ?? 'page viewport'}; time=${value.time ?? 'n/a'} s. Image understanding requires a vision-capable model.` }];
+    const frameHeader = frameTimes ? ` frameCount=${frameTimes.length} frameTimes=${JSON.stringify(frameTimes)}` : '';
+    const result: ToolOutcome = { text: `offset=${offset} end=${end} totalChars=${text.length} truncated=${end < text.length}${frameHeader}\n${text.slice(offset, end)}` };
+    if (image?.base64 && /^image\/(jpeg|png)$/.test(image.mime)) result.blobs = [{ bytes: Buffer.from(image.base64, 'base64'), mime: image.mime, name: 'ego-frame.jpg', fallbackText: `Ego image: ${capture ?? 'page viewport'}; time=${value.time ?? 'n/a'} s.${frameHeader} Image understanding requires a vision-capable model.` }];
     if (image?.mime && this.host?.modelFacts?.accepts(image.mime) === false) result.text += '\nThe configured model does not accept this image MIME. It can read the returned subtitles; choose a vision-capable model to interpret the frames.';
     return result;
   }

@@ -57,7 +57,7 @@ export async function videoOperation(args) {
         else cache.frames[cache.frames.length - 1] = { time, jpeg, capturedAt: now };
         cache.frames = cache.frames.filter(f => f.capturedAt >= now - windowMs - 1000).slice(-Math.max(1, Math.min(9, args.maxFrames ?? 4)));
         cache.lastTime = time;
-        result.frameTimes = cache.frames.map(f => f.time);
+        result.frameTimes = cache.frames.map(f => f.time); result.frameCount = cache.frames.length;
         result.capture = 'video-sample';
         if (args.action === 'sample') return result;
         const cols = Math.min(3, cache.frames.length), rows = Math.ceil(cache.frames.length / cols);
@@ -69,7 +69,7 @@ export async function videoOperation(args) {
           g.drawImage(image, x, y, width, height); g.fillStyle = '#fff'; g.font = '18px sans-serif'; g.fillText(`${f.time.toFixed(2)} s`, x + 8, y + height + 20);
         }
         result.image = { base64: grid.toDataURL('image/jpeg', 0.75).split(',')[1], mime: 'image/jpeg' };
-        result.capture = 'video-mosaic'; result.frameTimes = cache.frames.map(f => f.time);
+        result.capture = cache.frames.length > 1 ? 'video-mosaic' : 'video-frame'; result.frameTimes = cache.frames.map(f => f.time);
         // Keep the boundary frame as the start of the next observation window.
         if (args.consumeFrames) cache.frames = cache.frames.slice(-1);
       } catch (error) { result.captureNote = `Video pixels unavailable: ${error.message}`; }

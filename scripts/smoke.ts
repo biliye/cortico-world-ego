@@ -65,7 +65,7 @@ try {
     expression: `(async()=>{const end=Date.now()+12000;while(Date.now()<end){if(window.fixtureReady&&document.querySelector('video').readyState>=2)return true;await new Promise(r=>setTimeout(r,100));}throw new Error('synthetic video not ready')})()` });
   assert(!ready.error, ready.error); assert.equal(ready.value, true);
   const look = await call('video', { page, action: 'look' });
-  assert.equal(data(look).capture, 'video-mosaic'); assert.match(look.text, /Ego 字幕验收成功/);
+  assert.equal(data(look).capture, 'video-frame'); assert.match(look.text, /Ego 字幕验收成功/);
   assert(look.blobs?.length); await writeFile(join(dir, 'video-frame.jpg'), (look.blobs![0] as any).bytes);
   await call('video', { page, action: 'pause' });
   const seek = data(await call('video', { page, action: 'seek', time: 1 })); assert(Math.abs(seek.time - 1) < 0.15);
@@ -92,7 +92,7 @@ try {
   } while (Date.now() < frameDeadline);
   assert(frame.found && frame.readyState >= 2, 'Cross-origin video not decoded');
   const iframeLook = await call('video', { page, action: 'look', frameId: frame.frameId });
-  assert.equal(data(iframeLook).capture, 'video-mosaic'); assert.match(iframeLook.text, /Ego 字幕验收成功/);
+  assert.equal(data(iframeLook).capture, 'video-frame'); assert.match(iframeLook.text, /Ego 字幕验收成功/);
   await call('close', { page });
   await world.stop();
   const finished = await bridge.run('finish', { spaceId: world.status().spaceId }); assert(!finished.error, finished.error);

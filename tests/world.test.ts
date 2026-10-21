@@ -117,6 +117,29 @@ describe('control boundaries', () => {
 });
 
 describe('video observation lifetime', () => {
+  // Let real receipt persistence finish between fake clock ticks, as it does at runtime.
+  async function advance(ms: number) {
+    while (ms > 0) { const step = Math.min(ms, 1000); await vi.advanceTimersByTimeAsync(step); await (world as any).queue; ms -= step; }
+  }
+  it('samples four frames within each 15-second scene and sends only the mosaic', async () => {
+    vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });
+    const start = browser.calls.length;
+    await advance(10000);
+    expect(browser.calls.slice(start).map(c => c.args.action)).toEqual(['sample', 'sample']);
+    expect(deferred).toHaveLength(0);
+    await advance(5000);
+    expect(browser.calls.slice(start).map(c => c.args.action)).toEqual(['sample', 'sample', 'look']);
+    expect(browser.calls.at(-1)?.args.consumeFrames).toBe(true);
+    expect(deferred).toHaveLength(1);
+    const scene = await deferred[0].render(); expect(scene && typeof scene !== 'string' && scene.blobs).toHaveLength(1);
+  });
+  it('with one frame configured captures only at the delivery interval', async () => {
+    cfg.video.maxFrames = 1; vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });
+    const start = browser.calls.length;
+    await advance(14999); expect(browser.calls).toHaveLength(start);
+    await advance(1);
+    expect(browser.calls.slice(start).map(c => c.args.action)).toEqual(['look']);
+  });
   it('returns real image bytes as an attachment instead of base64 in context text', async () => {
     const result = await call('video', { page: 'p1', action: 'look' });
     expect(Buffer.from((result.blobs![0] as any).bytes).toString()).toBe('jpeg');
@@ -124,28 +147,28 @@ describe('video observation lifetime', () => {
   });
   it('invalidates a queued scene when paused before delivery', async () => {
     vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });
-    await vi.advanceTimersByTimeAsync(15000); await (world as any).queue;
+    await advance(15000);
     expect(deferred).toHaveLength(1); expect(deferred[0].render()).not.toBe(null);
     await call('video', { page: 'p1', action: 'pause' });
     expect(deferred[0].render()).toBe(null);
-    const count = browser.calls.length; await vi.advanceTimersByTimeAsync(60000);
+    const count = browser.calls.length; await advance(60000);
     expect(browser.calls.length).toBe(count);
   });
   it('stops polling when a page changes its video source', async () => {
     vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });
     browser.next = { spaceId: 1, value: { found: true, time: 0, source: 'new-video' } };
-    await vi.advanceTimersByTimeAsync(15000); await (world as any).queue;
+    await advance(15000);
     expect(world.status().watching).toBe(null); expect(deferred).toHaveLength(0);
   });
   it('keeps only the newest undelivered scene while the bot is busy', async () => {
     vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });
-    await vi.advanceTimersByTimeAsync(15000); await (world as any).queue;
-    await vi.advanceTimersByTimeAsync(15000); await (world as any).queue;
+    await advance(15000);
+    await advance(15000);
     expect(deferred).toHaveLength(2); expect(deferred[0].render()).toBe(null); expect(deferred[1].render()).not.toBe(null);
   });
   it('invalidates an undelivered scene when the World stops', async () => {
     vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });
-    await vi.advanceTimersByTimeAsync(15000); await (world as any).queue;
+    await advance(15000);
     await world.stop(); expect(deferred[0].render()).toBe(null);
   });
   it('starts a new mosaic history for each explicit watch session', async () => {
@@ -155,8 +178,8 @@ describe('video observation lifetime', () => {
   it('does not poll after an operator-controlled Space error', async () => {
     vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });
     browser.next = { error: 'inactive', code: 'EGO_TASK_SPACE_INACTIVE' };
-    await vi.advanceTimersByTimeAsync(15000); await (world as any).queue;
-    const count = browser.calls.length; await vi.advanceTimersByTimeAsync(60000);
+    await advance(15000);
+    const count = browser.calls.length; await advance(60000);
     expect(browser.calls.length).toBe(count); expect(deferred).toHaveLength(0);
   });
   it('serializes concurrent tool calls, including operations after an abort', async () => {

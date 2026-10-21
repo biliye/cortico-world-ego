@@ -1,5 +1,6 @@
 /** Executed by the official ego-browser Node runtime, whose helpers are globals. */
 import { videoOperation } from './video-page.mjs';
+import { bilibiliDanmaku, decodeDanmakuSegment } from './bilibili-danmaku.mjs';
 import { readFile } from 'node:fs/promises';
 
 function errorCode(error) {
@@ -119,8 +120,13 @@ async function runVideo(task, page, args) {
     state.captureNote = 'Video pixels could not be read (CORS/DRM/not ready). This image is the page viewport at capture time; it may not show the video.';
   }
   if (args.action === 'look' && /(^|\.)bilibili\.com$/.test(new URL(await page.url()).hostname)) {
-    try { state.bilibili = await page.evaluate(bilibiliSubtitles, { time: state.time, since: args.since ?? Math.max(0, state.time - 15) }); }
+    const range = { time: state.time, since: args.since <= state.time ? args.since : Math.max(0, state.time - 15) };
+    try { state.bilibili = await page.evaluate(bilibiliSubtitles, range); }
     catch (error) { if (errorCode(error)?.startsWith('EGO_TASK_') || error.mayHaveLateEffects) throw error; state.subtitleError = error.message; }
+    if (args.danmaku !== false) {
+      try { state.danmaku = await page.evaluate(`(${bilibiliDanmaku.toString()})(${JSON.stringify(range)},${decodeDanmakuSegment.toString()})`); }
+      catch (error) { if (errorCode(error)?.startsWith('EGO_TASK_') || error.mayHaveLateEffects) throw error; state.danmaku = { status: 'unavailable', error: error.message }; }
+    }
   }
   return state;
 }

@@ -64,3 +64,16 @@ it('returns a serializable null when page JavaScript returns undefined', async (
   const result = await execute({ operation: 'evaluate', args: { page: 'p1', expression: 'undefined' } });
   expect(JSON.parse(JSON.stringify(result)).value).toBe(null);
 });
+it('still returns danmaku when the subtitle API fails and obeys the danmaku switch', async () => {
+  page.url = async () => 'https://www.bilibili.com/video/BVfixture';
+  const evaluate = vi.fn(async (fn: unknown) => {
+    if (typeof fn === 'function') throw new Error('Subtitle API denied');
+    return { status: 'available', comments: [{ time: 2, text: '弹幕' }] };
+  });
+  page.evaluate = evaluate;
+  const result = await execute({ operation: 'video', args: { page: 'p1', action: 'look' } });
+  expect(result.value.subtitleError).toBe('Subtitle API denied'); expect(result.value.danmaku.comments[0].text).toBe('弹幕');
+  evaluate.mockClear();
+  const off = await execute({ operation: 'video', args: { page: 'p1', action: 'look', danmaku: false } });
+  expect(off.value.danmaku).toBeUndefined(); expect(evaluate).toHaveBeenCalledTimes(1);
+});

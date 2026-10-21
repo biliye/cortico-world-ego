@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-ego",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "author": { "name": "筆離嘢" },
   "description": "Ego Lite 浏览器 World：Cortico 与 Coopanion 共用官方 ego-browser 接口，在独立 Space 中浏览网页、点击填表、截图，以及观看 HTML5 / B 站视频的画面与字幕。需先安装 Ego Lite。",
@@ -15,7 +15,7 @@
     "locales": { "en": { "displayName": "Ego Browser", "description": "Ego Lite browser for Cortico and Coopanion: isolated task spaces, browsing, screenshots, HTML5/Bilibili video frames and subtitles. Requires an installed Ego Lite and ego-browser CLI." } },
     "describe": "describe.json", "webUiClient": "dist/webui.js"
   },
-  "files": ["src", "dist", "assets", "README.md", "describe.json", "CHANGELOG.md", "LICENSE"],
+  "files": ["src", "dist", "assets", "README.md", "describe.json", "CHANGELOG.md", "LICENSE", "THIRD_PARTY_NOTICES.md"],
   "scripts": {
     "typecheck": "tsc --noEmit", "test": "vitest run", "build:webui": "node scripts/build-webui.mjs",
     "smoke": "node --import ./scripts/register.mjs --experimental-transform-types scripts/smoke.ts",

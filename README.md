@@ -1,12 +1,32 @@
 # cortico-world-ego
 
-让 Cortico 与 Coopanion（Coo）通过已安装的 [Ego Lite](https://github.com/citrolabs/ego-lite) 浏览网页、读取字幕和视频画面。World id 为 `ego`，契约为 world 6。
+<img src="assets/icon.svg" width="96" height="96" alt="Ego 浏览器图标">
+
+Ego 浏览器：专为 AI 打造的浏览器 World，让你家的小肥鱼上网、看图、看视频更顺手。让 Cortico 与 Coopanion（Coo）通过已安装的 [Ego Lite](https://github.com/citrolabs/ego-lite) 浏览网页、读取字幕和视频画面。World id 为 `ego`，契约为 world 6。
 
 需要本机 Ego Lite 与 `ego-browser` 2.1 API。直接连接时由宿主调用 CLI；管理员宿主通过独立的普通权限助手调用。助手需要系统可找到 Node.js 22 以上。无需 web-access、Chrome 调试端口或另一个浏览器实例。Windows/macOS 可用。
 
-在宿主的「扩展 → 手动安装」中填本包目录或本地 `.tgz`，重启宿主，再启用「Ego 浏览器」World。无需停用原 Browser：工具分别使用 `ego_` 与 `browser_` 前缀，配置分别为 `worlds.ego` 与 `worlds.browser`。
+**这不是即插即用的包**：装完扩展还要先装 Ego Lite，再启用 World。市场卡片会带「需额外安装」标签，指的就是这一步。
+
+## 怎么装
+
+1. 装 Ego Lite（[citrolabs/ego-lite](https://github.com/citrolabs/ego-lite)），确认命令行能运行 `ego-browser`。
+2. 在宿主「扩展」市场搜 `cortico-world-ego` 安装并重启宿主；也可以从 npm 下载本包，用「手动安装」填入目录或 `.tgz`。不要用全局 `npm i -g`，Cortico 扩展由宿主自己管理依赖。
+3. 在宿主的「扩展 → 手动安装」中填本包目录或本地 `.tgz` 同样可以，重启宿主，再启用「Ego 浏览器」World。
+
+无需停用原 Browser：工具分别使用 `ego_` 与 `browser_` 前缀，配置分别为 `worlds.ego` 与 `worlds.browser`。
 
 若宿主报找不到命令，在 World 配置里将 `cliFile` 填为 `ego-browser.exe` 的完整路径（macOS 填对应可执行文件）。Windows 可在命令行用 `Get-Command ego-browser` 查看路径。路径只填写可执行文件，不附带参数，不支持 `.cmd`/`.bat`。修改可执行文件或 Space 名称后重启这个 World。
+
+## 市场标签
+
+- `internet`、`browser`、`video`：联网读页面、操作浏览器、看视频与字幕。
+- `external-setup`（需额外安装）：扩展本身不够，必须先装 Ego Lite。
+- `high-cost`：持续观看会把画面附件放进模型上下文，token 用得快。
+
+## 反馈
+
+去 [GitHub 开 issue](https://github.com/biliye/cortico-world-ego/issues)，或在 QQ 群里 @筆離嘢（与作者同名）。
 
 ## 管理员宿主如何连接（0.1.1）
 

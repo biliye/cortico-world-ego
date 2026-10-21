@@ -14,8 +14,9 @@ export async function videoOperation(args) {
   if (!cache || cache.video !== v || cache.src !== v.currentSrc) {
     cache = globalThis.__corticoEgoVideo = { video: v, src: v.currentSrc, frames: [], lastTime: -1 };
   }
+  if (args.snapshotOnly) cache = { ...cache, frames: [...cache.frames] };
   const clear = () => { cache.frames = []; cache.lastTime = -1; };
-  if (args.resetFrames || args.action === 'pause') clear();
+  if (args.resetFrames || (args.action === 'pause' && !args.preserveFrames)) clear();
   if (args.action === 'play') await v.play();
   else if (args.action === 'pause') v.pause();
   else if (args.action === 'seek') {
@@ -43,6 +44,10 @@ export async function videoOperation(args) {
   const result = { found: true, count: videos.length, time, duration: Number.isFinite(v.duration) ? v.duration : null,
     paused: v.paused, ended: v.ended, readyState: v.readyState, width: v.videoWidth, height: v.videoHeight,
     source: v.currentSrc, tracks, capture: null, image: null };
+  // Hold the playhead while the host assembles/enriches a watched scene.
+  if (args.action === 'look' && args.holdPlayback && !v.paused && !v.ended) {
+    v.pause(); result.playbackHeld = true;
+  }
   if (args.action === 'look' || args.action === 'sample') {
     if (v.readyState < 2 || !v.videoWidth) result.captureNote = 'Video frame is not decoded yet.';
     else {
@@ -55,7 +60,9 @@ export async function videoOperation(args) {
         const now = Date.now(), windowMs = Math.max(10000, Math.min(120000, args.windowMs ?? 15000));
         if (cache.lastTime !== time || !cache.frames.length) cache.frames.push({ time, jpeg, capturedAt: now });
         else cache.frames[cache.frames.length - 1] = { time, jpeg, capturedAt: now };
-        cache.frames = cache.frames.filter(f => f.capturedAt >= now - windowMs - 1000).slice(-Math.max(1, Math.min(9, args.maxFrames ?? 4)));
+        // Unconsumed watch frames survive slow CLI/subtitle calls until the batch is assembled.
+        cache.frames = (args.collecting ? cache.frames : cache.frames.filter(f => f.capturedAt >= now - windowMs - 1000))
+          .slice(-Math.max(1, Math.min(9, args.maxFrames ?? 4)));
         cache.lastTime = time;
         result.frameTimes = cache.frames.map(f => f.time); result.frameCount = cache.frames.length;
         result.capture = 'video-sample';

@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
+import { videoOperation } from '../src/video-page.mjs';
 import { EgoWorld, normalizeUrl } from '../src/world.ts';
 import { EGO_DEFAULTS } from '../src/config.ts';
 import { EGO } from '../src/definition.ts';
@@ -165,11 +167,12 @@ describe('video observation lifetime', () => {
   async function advance(ms: number) {
     while (ms > 0) { const step = Math.min(ms, 1000); await vi.advanceTimersByTimeAsync(step); await (world as any).queue; ms -= step; }
   }
-  it('identifies the initial preview and explains that look does not collect a time window', async () => {
+  it('keeps the first watch frame local and explains that look does not collect a time window', async () => {
     const peek = await call('video', { page: 'p1', action: 'look' });
     expect(peek.text).toContain('"capture":"video-frame"'); expect(peek.text).toContain('"phase":"snapshot"'); expect(peek.text).toContain('does not wait');
     const start = await call('video', { page: 'p1', action: 'watch' });
-    expect(start.text).toContain('"phase":"collecting"'); expect(start.text).toContain('"nextEvent":"ego.video.scene"'); expect(start.text).toContain('"frameCount":1');
+    expect(start.text).toContain('"phase":"collecting"'); expect(start.text).toContain('"nextEvent":"ego.video.scene"');
+    expect(start.blobs).toBeUndefined(); expect(start.text).not.toContain('"frameCount"'); expect(deferred).toHaveLength(0);
   });
   it('flushes a short final scene before 15 seconds, stops watching and leaves the scene deliverable', async () => {
     vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });
@@ -240,11 +243,78 @@ describe('video observation lifetime', () => {
     await advance(15000);
     expect(world.status().watching).toBe(null); expect(deferred).toHaveLength(0);
   });
-  it('keeps only the newest undelivered scene while the bot is busy', async () => {
+  it('keeps every completed mosaic in order while the bot is busy', async () => {
     vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });
     await advance(15000);
     await advance(15000);
-    expect(deferred).toHaveLength(2); expect(deferred[0].render()).toBe(null); expect(deferred[1].render()).not.toBe(null);
+    expect(deferred).toHaveLength(2); expect(deferred[0].render()).not.toBe(null); expect(deferred[1].render()).not.toBe(null);
+    expect(deferred[0].render()).toBe(null);
+  });
+  it('pauses at a bounded scene backlog and resumes after delivery without resetting collection', async () => {
+    vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });
+    await advance(60000); expect(deferred).toHaveLength(4);
+    expect(browser.calls.at(-1)?.args).toMatchObject({ action: 'pause', preserveFrames: true });
+    const count = browser.calls.length; await advance(30000); expect(browser.calls).toHaveLength(count);
+    expect(deferred[0].render()).not.toBe(null); await (world as any).queue;
+    expect(browser.calls.at(-1)?.args.action).toBe('play'); expect(world.status().watching).toBe('p1');
+    await advance(15000); expect(deferred).toHaveLength(5);
+    for (const scene of deferred.slice(1)) expect(scene.render()).not.toBe(null);
+  });
+  it('does not resume playback from backlog delivery after an explicit pause', async () => {
+    vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' }); await advance(60000);
+    await call('video', { page: 'p1', action: 'pause' });
+    const count = browser.calls.length;
+    for (const scene of deferred) expect(scene.render()).toBe(null);
+    await (world as any).queue; await advance(30000); expect(browser.calls).toHaveLength(count);
+  });
+  it('does not let play bypass a full observation queue', async () => {
+    vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' }); await advance(60000);
+    const count = browser.calls.length;
+    const result = await call('video', { page: 'p1', action: 'play' });
+    expect(result.text).toContain('resume automatically'); expect(browser.calls).toHaveLength(count);
+  });
+  it('stops collection if its first sample fails', async () => {
+    const original = browser.run.bind(browser);
+    browser.run = async (op, args) => args.action === 'sample' ? { error: 'first capture failed' } : original(op, args);
+    expect((await call('video', { page: 'p1', action: 'watch' })).failed).toBe(true);
+    expect(world.status().watching).toBe(null); expect(deferred).toHaveLength(0);
+  });
+  it('delivers nine actual frames per batch and shared boundaries despite slow receipts and enrichment', async () => {
+    vi.useFakeTimers(); cfg.video.maxFrames = 9;
+    let updatedAt = Date.now();
+    const video = { tagName: 'VIDEO', currentSrc: 'video1', currentTime: 0, readyState: 4, videoWidth: 640, videoHeight: 360,
+      duration: 600, paused: false, ended: false, textTracks: [], play() { this.paused = false; }, pause() { this.paused = true; } };
+    const op = runInNewContext(`(${videoOperation.toString()})`, { Date, Image: class { async decode() {} }, document: {
+      querySelectorAll: () => [video], createElement: () => ({ getContext: () => ({ drawImage() {}, fillRect() {}, fillText() {} }),
+        toDataURL: () => 'data:image/jpeg;base64,anBlZw==' }),
+    } });
+    let delayed = false;
+    browser.run = async (_operation, args) => {
+      if (!video.paused) video.currentTime += (Date.now() - updatedAt) / 1000;
+      updatedAt = Date.now();
+      const value = await op(args);
+      // Model a slow subtitle/danmaku response after the first mosaic has been captured.
+      const delay = args.action === 'look' && !delayed ? (delayed = true, 11500) : 300;
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return { value: { ...value, frameId: 'frame1' } };
+    };
+    const start = call('video', { page: 'p1', action: 'watch' });
+    await vi.advanceTimersByTimeAsync(1000); expect((await start).blobs).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(45000);
+    expect(deferred.length).toBeGreaterThanOrEqual(2);
+    const batches = [];
+    for (const scene of deferred.slice(0, 2)) {
+      const rendered = await scene.render(); expect(rendered && typeof rendered !== 'string' && rendered.blobs).toHaveLength(1);
+      if (!rendered || typeof rendered === 'string') throw new Error('Missing mosaic');
+      batches.push(JSON.parse(rendered.text.slice(rendered.text.indexOf('\n', rendered.text.indexOf('totalChars=')) + 1)));
+    }
+    expect(batches.map(batch => batch.frameCount)).toEqual([9, 9]);
+    expect(batches[0].frameTimes.at(-1)).toBe(batches[1].frameTimes[0]);
+    expect(batches[0].frameTimes[0]).toBeCloseTo(0.3);
+    expect(batches[0].frameTimes.at(-1) - batches[0].frameTimes[0]).toBeCloseTo(15, 1);
+    expect(batches[0].frameTimes.every((t: number, i: number, times: number[]) => i === 0 || t > times[i - 1])).toBe(true);
+    expect(batches[1].frameTimes.every((t: number, i: number, times: number[]) => i === 0 || t - times[i - 1] < 2)).toBe(true);
+    const stopping = world.stop(); await vi.advanceTimersByTimeAsync(1000); await stopping;
   });
   it('invalidates an undelivered scene when the World stops', async () => {
     vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });

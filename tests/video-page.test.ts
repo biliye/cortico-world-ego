@@ -33,3 +33,33 @@ it('still captures a paused frame after the previous wall-clock window has expir
   const scene = await f.capture(0, 'look', {}, 40);
   expect(scene.frameTimes).toEqual([0]); expect(scene.image.mime).toBe('image/jpeg'); expect(scene.capture).toBe('video-frame'); expect(scene.frameCount).toBe(1);
 });
+it('retains all nine unconsumed watch frames when command latency exceeds the nominal window', async () => {
+  const f = fixture(), options = { maxFrames: 9, collecting: true };
+  await f.capture(0, 'sample', options);
+  for (let i = 1; i < 8; i++) await f.capture(i * 2.2, 'sample', options);
+  const first = await f.capture(17.6, 'look', { ...options, consumeFrames: true });
+  expect(first.frameCount).toBe(9); expect(first.frameTimes[0]).toBe(0);
+  // A long enrichment call must not expire the boundary kept for the next batch.
+  for (let i = 1; i < 8; i++) await f.capture(29.1 + i * 2.2, 'sample', options);
+  const next = await f.capture(46.7, 'look', { ...options, consumeFrames: true });
+  expect(next.frameCount).toBe(9); expect(next.frameTimes[0]).toBe(first.frameTimes.at(-1));
+});
+it('preserves the next batch boundary during delivery backpressure', async () => {
+  const f = fixture(); await f.capture(0, 'sample', { collecting: true }); await f.capture(5, 'sample', { collecting: true });
+  await f.capture(5, 'pause', { preserveFrames: true });
+  const scene = await f.capture(10, 'look', { collecting: true }, 90);
+  expect(scene.frameTimes).toEqual([0, 5, 10]);
+});
+it('holds playback after a watched scene capture without discarding the shared boundary', async () => {
+  const f = fixture(); await f.capture(0, 'sample', { collecting: true });
+  const scene = await f.capture(5, 'look', { collecting: true, consumeFrames: true, holdPlayback: true });
+  expect(scene.frameTimes).toEqual([0, 5]); expect(scene.paused).toBe(false); expect(scene.playbackHeld).toBe(true); expect(f.video.paused).toBe(true);
+  expect((await f.capture(10, 'sample', { collecting: true }, 30)).frameTimes).toEqual([5, 10]);
+});
+it('does not let an explicit look evict samples from the active watch batch', async () => {
+  const f = fixture(), options = { collecting: true };
+  await f.capture(0, 'sample', options);
+  expect((await f.capture(2, 'look', { ...options, snapshotOnly: true })).frameTimes).toEqual([0, 2]);
+  await f.capture(5, 'sample', options); await f.capture(10, 'sample', options);
+  expect((await f.capture(15, 'look', { ...options, consumeFrames: true })).frameTimes).toEqual([0, 5, 10, 15]);
+});

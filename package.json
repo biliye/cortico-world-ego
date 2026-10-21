@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-ego",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "author": { "name": "筆離嘢" },
   "description": "Ego Lite 浏览器 World：Cortico 与 Coopanion 共用官方 ego-browser 接口，在独立 Space 中浏览网页、点击填表、截图，以及观看 HTML5 / B 站视频的画面与字幕。需先安装 Ego Lite。",
@@ -21,6 +21,7 @@
     "smoke": "node --import ./scripts/register.mjs --experimental-transform-types scripts/smoke.ts",
     "smoke:helper": "node --import ./scripts/register.mjs --experimental-transform-types scripts/smoke-helper.ts",
     "smoke:tail": "node --import ./scripts/register.mjs --experimental-transform-types scripts/smoke-short-tail.ts",
+    "smoke:continuity": "node --import ./scripts/register.mjs --experimental-transform-types scripts/smoke-continuity.ts",
     "prepack": "node scripts/build-webui.mjs", "prepublishOnly": "pnpm typecheck && pnpm test"
   },
   "devDependencies": { "@types/node": "^22.10.0", "typescript": "^5.7.2", "vitest": "^2.1.8", "esbuild": "^0.24.0" }

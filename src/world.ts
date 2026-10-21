@@ -13,7 +13,8 @@ import { prepareHelperLauncher } from './helper-launcher.ts';
 import { isConnectionFailure, normalizeFailure } from './failures.ts';
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 const STOP_CODES = /EGO_TASK_SPACE_(USER_IN_CONTROL|INACTIVE|NAME_IN_USE|NOT_FOUND|NOT_SELECTED|UNAVAILABLE)|EGO_TASK_HOST_DISCONNECTED/;
-interface Watch { page: string; frameId?: string; selector?: string; index?: number; since?: number; source?: string; generation: number; nextSceneAt: number; completed?: boolean }
+interface Watch { page: string; frameId?: string; selector?: string; index?: number; since?: number; source?: string; generation: number; nextSampleAt: number; samples: number; completed?: boolean; backpressured?: boolean }
+const MAX_PENDING_SCENES = 4;
 interface SavedState { spaceId?: number; halted: boolean; reason: string; code?: string; spaceMissing?: boolean }
 export interface EgoWorldOptions {
   cfg: EgoConfigSection; timezone: string; dataDir: string; botDir: string; bridge?: EgoBridge;
@@ -37,8 +38,7 @@ export class EgoWorld implements World {
   private timer?: ReturnType<typeof setTimeout>;
   private watch?: Watch;
   private generation = 0;
-  private sceneToken = 0;
-  private pendingScene?: { token: number; page: string; outcome: ToolOutcome };
+  private pendingScenes = new Set<{ page: string; outcome?: ToolOutcome }>();
   constructor(private readonly options: EgoWorldOptions) {
     this.spaceName = options.cfg.spaceName || `Cortico-${createHash('sha256').update(options.botDir).digest('hex').slice(0, 12)}`;
     this.stateFile = join(options.dataDir, 'ego', 'space.json');
@@ -188,18 +188,26 @@ export class EgoWorld implements World {
     await this.save(); await this.event('state', this.saved.reason, true);
     return { text: this.saved.reason };
   }
-  private cancelWatch(): void { this.generation++; if (this.timer) clearTimeout(this.timer); this.timer = undefined; this.watch = undefined; this.pendingScene = undefined; }
+  private cancelWatch(): void {
+    this.generation++; if (this.timer) clearTimeout(this.timer); this.timer = undefined; this.watch = undefined;
+    for (const scene of this.pendingScenes) scene.outcome = undefined;
+    this.pendingScenes.clear();
+  }
   private async invokeTool(operation: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome> {
     const args = validate(operation, input);
     if (operation === 'handoff') return this.handoff();
-    if ((operation === 'close' || operation === 'navigate') && (this.watch?.page === args.page || this.pendingScene?.page === args.page)) this.cancelWatch();
+    if ((operation === 'close' || operation === 'navigate') && (this.watch?.page === args.page || [...this.pendingScenes].some(scene => scene.page === args.page))) this.cancelWatch();
     if (operation !== 'video') {
       const value = await this.command(operation, args, signal);
       return this.outcome(value, operation === 'read' ? Number(args.offset ?? 0) : 0, Number(args.maxChars ?? this.options.cfg.maxChars));
     }
     const action = String(args.action);
+    if (action === 'play' && this.watch?.backpressured && this.watch.page === args.page) {
+      return { text: 'Playback is waiting for queued mosaics to be delivered. It will resume automatically after delivery.' };
+    }
     if (['pause', 'seek', 'exit', 'watch'].includes(action)) this.cancelWatch();
-    const videoArgs = { ...args, ...this.videoCaptureOptions() };
+    const videoArgs = { ...args, ...this.videoCaptureOptions(), collecting: action === 'watch' || this.watch?.page === args.page,
+      snapshotOnly: action === 'look' && this.watch?.page === args.page };
     const value = await this.command('video', { ...videoArgs, resetFrames: action === 'watch' || action === 'exit', action: action === 'watch' ? 'play' : action === 'exit' ? 'pause' : action }, signal);
     if (!value.found) return { text: `offset=0\n${JSON.stringify(value)}`, ...(action === 'inspect' ? {} : { failed: true as const }) };
     if (!['inspect', 'look'].includes(action)) await this.event('video.state', JSON.stringify({ page: args.page, action, time: value.time, paused: value.paused }), true);
@@ -208,35 +216,50 @@ export class EgoWorld implements World {
         note: 'look captures now; it does not wait to collect a time window. For several frames within 15 seconds, call watch once and wait for ego.video.scene. Repeated watch restarts sampling.' };
       return this.outcome(value);
     }
+    const startedAt = Date.now();
     const watch: Watch = { page: String(args.page), frameId: value.frameId, selector: args.selector as string | undefined, index: args.index as number | undefined,
-      since: value.time, source: value.source, generation: this.generation, nextSceneAt: Date.now() + this.videoInterval() };
+      since: value.time, source: value.source, generation: this.generation, nextSampleAt: startedAt + this.sampleInterval(), samples: 1 };
     this.watch = watch;
-    const scene = await this.command('video', { ...videoArgs, action: 'look', frameId: value.frameId }, signal);
+    let scene;
+    try { scene = await this.command('video', { ...videoArgs, action: 'sample', frameId: value.frameId }, signal); }
+    catch (error) { this.cancelWatch(); throw error; }
+    if (!this.running || this.watch !== watch || this.generation !== watch.generation) return { text: 'Video collection stopped before the first frame was ready.' };
     if (!scene.found || scene.paused || scene.ended || scene.source !== watch.source) {
       this.cancelWatch(); scene.observation = { phase: scene.ended ? 'ended' : 'stopped', watching: false, note: 'Playback stopped before the first collection window. Only the actually captured frames are returned.' };
       return this.outcome(scene);
     }
     watch.since = scene.time;
-    watch.nextSceneAt = Date.now() + this.videoInterval();
     scene.observation = { phase: 'collecting', watching: true, intervalMs: this.videoInterval(), plannedFrames: this.videoCaptureOptions().maxFrames,
-      nextEvent: 'ego.video.scene', note: 'This is the initial preview, not the completed interval mosaic. Wait for ego.video.scene before describing the multi-frame observation; do not restart watch between samples.' };
+      nextEvent: 'ego.video.scene', note: 'Collection started. The first frame stays in the local buffer; the completed mosaic arrives as ego.video.scene. Do not restart watch between samples.' };
+    delete scene.image; delete scene.capture; delete scene.frameTimes; delete scene.frameCount;
     this.schedule(watch);
     return this.outcome(scene);
   }
   private videoInterval(): number { return bounded(this.options.cfg.video.intervalMs, 10000, 120000, 15000); }
   private videoCaptureOptions() { return { maxFrames: bounded(this.options.cfg.video.maxFrames, 1, 9, 4), frameWidth: bounded(this.options.cfg.video.frameWidth, 240, 1280, 640), windowMs: this.videoInterval(), danmaku: this.options.cfg.video.danmaku !== false }; }
+  private sampleInterval(): number { return this.videoInterval() / Math.max(1, this.videoCaptureOptions().maxFrames - 1); }
   private publishScene(watch: Watch, value: any, final = false): void {
     value.observation = { phase: final ? 'ended' : 'scene', ...(final ? { watching: false } : {}), final, intervalMs: this.videoInterval(),
       note: final ? 'Playback ended. These are the frames actually collected before the end; watching has stopped.' : 'Completed observation window. Use frameTimes in row-major order; the actual frame count can be below the configured maximum.' };
-    const token = ++this.sceneToken;
-    this.pendingScene = { token, page: watch.page, outcome: this.outcome(value) };
+    const pending = { page: watch.page, outcome: this.outcome(value) as ToolOutcome | undefined };
+    this.pendingScenes.add(pending);
     this.host?.pushDeferred({ type: 'ego.video.scene', origin: 'external', senderKey: this.id,
       render: () => {
-        if (!this.running || (this.watch !== watch && !(watch.completed && this.watch === undefined)) || this.generation !== watch.generation || this.saved.halted || this.pendingScene?.token !== token) return null;
-        const outcome = this.pendingScene.outcome;
+        if (!this.running || (this.watch !== watch && !(watch.completed && this.watch === undefined)) || this.generation !== watch.generation || this.saved.halted || !pending.outcome) return null;
+        const outcome = pending.outcome; pending.outcome = undefined; this.pendingScenes.delete(pending);
+        if (watch.backpressured) void this.serial(() => this.resumeAfterDelivery(watch));
         return { text: `page=${watch.page}\n${outcome.text}`, blobs: outcome.blobs };
       },
     }, { trigger: 'debounce' });
+  }
+  private async resumeAfterDelivery(watch: Watch): Promise<void> {
+    if (!this.running || this.saved.halted || this.watch !== watch || !watch.backpressured || this.pendingScenes.size >= MAX_PENDING_SCENES) return;
+    try {
+      const value = await this.command('video', { ...watch, action: 'play' });
+      if (!value.found || value.ended || value.paused || value.source !== watch.source) { this.cancelWatch(); return; }
+      watch.backpressured = false; watch.nextSampleAt = Date.now() + this.sampleInterval(); this.schedule(watch);
+      await this.event('video.state', 'Scene delivery caught up; playback and observation resumed.', true);
+    } catch (error) { this.cancelWatch(); await this.event('video.state', `Video observation stopped: ${String(error)}`, true); }
   }
   private schedule(watch: Watch): void {
     if (!this.running || this.saved.halted || this.watch !== watch) return;
@@ -244,14 +267,15 @@ export class EgoWorld implements World {
       void this.serial(async () => {
         if (!this.running || this.watch !== watch || this.generation !== watch.generation || this.saved.halted) return;
         try {
-          const observe = Date.now() >= watch.nextSceneAt;
-          let value = await this.command('video', { ...watch, ...this.videoCaptureOptions(), action: observe ? 'look' : 'sample', consumeFrames: observe });
+          const observe = watch.samples >= Math.max(1, this.videoCaptureOptions().maxFrames - 1);
+          const startedAt = Date.now();
+          let value = await this.command('video', { ...watch, ...this.videoCaptureOptions(), collecting: true, action: observe ? 'look' : 'sample', consumeFrames: observe, holdPlayback: observe });
           if (!this.running || this.watch !== watch || this.generation !== watch.generation) return;
           if (!value.found || (!value.ended && value.paused) || value.source !== watch.source) {
             this.cancelWatch(); await this.event('video.state', `Watching stopped: ${JSON.stringify({ page: watch.page, found: value.found, paused: value.paused, ended: value.ended, sourceChanged: value.source !== watch.source })}`, true); return;
           }
           if (value.ended) {
-            if (!observe) value = await this.command('video', { ...watch, ...this.videoCaptureOptions(), action: 'look', consumeFrames: true });
+            if (!observe) value = await this.command('video', { ...watch, ...this.videoCaptureOptions(), collecting: true, action: 'look', consumeFrames: true });
             if (!this.running || this.watch !== watch || this.generation !== watch.generation) return;
             if (!value.found || !value.ended || value.source !== watch.source) { this.cancelWatch(); return; }
             // Natural completion keeps its last scene deliverable. Explicit cancellation still invalidates it.
@@ -264,13 +288,27 @@ export class EgoWorld implements World {
             watch.since = value.time;
             this.publishScene(watch, value);
           }
-          if (observe) watch.nextSceneAt = Date.now() + this.videoInterval();
+          watch.samples = observe ? 1 : watch.samples + 1;
+          // Account for command latency without accumulating an extra interval after each receipt.
+          watch.nextSampleAt = startedAt + this.sampleInterval();
+          if (observe && this.pendingScenes.size >= MAX_PENDING_SCENES) {
+            watch.backpressured = true;
+            if (!value.playbackHeld) await this.command('video', { ...watch, action: 'pause', preserveFrames: true });
+            await this.event('video.state', 'Playback paused while completed mosaics wait for delivery. Observation resumes automatically after delivery; queued scenes are retained.', true);
+            return;
+          }
+          if (value.playbackHeld) {
+            const resumedAt = Date.now();
+            const resumed = await this.command('video', { ...watch, action: 'play' });
+            if (!resumed.found || resumed.paused || resumed.ended || resumed.source !== watch.source) { this.cancelWatch(); return; }
+            watch.nextSampleAt = resumedAt + this.sampleInterval();
+          }
           this.schedule(watch);
         } catch (error) {
           this.cancelWatch(); await this.event('video.state', `Video observation stopped: ${String(error)}`, true);
         }
       });
-    }, Math.max(0, Math.min(watch.nextSceneAt - Date.now(), this.videoInterval() / Math.max(1, this.videoCaptureOptions().maxFrames - 1))));
+    }, Math.max(0, watch.nextSampleAt - Date.now()));
     this.timer.unref?.();
   }
   private outcome(value: any, offset = 0, maxChars = this.options.cfg.maxChars): ToolOutcome {

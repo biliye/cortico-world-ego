@@ -37,9 +37,10 @@ try {
   const ready = await bridge.run('evaluate', { spaceId: world.status().spaceId, page, expression: `(async()=>{const end=Date.now()+12000;while(Date.now()<end){if(window.fixtureReady&&document.querySelector('video').readyState>=2)return true;await new Promise(r=>setTimeout(r,100));}throw new Error('video not decoded')})()` });
   assert(!ready.error, ready.error); assert.equal(ready.value, true);
   await call('video', { page, action: 'pause' }); await call('video', { page, action: 'seek', time: 2 });
-  const preview = data(await call('video', { page, action: 'watch' }));
-  assert.equal(preview.capture, 'video-frame'); assert.equal(preview.frameCount, 1); assert.equal(preview.observation.phase, 'collecting');
-  evidence.preview = preview;
+  const start = await call('video', { page, action: 'watch' });
+  const collecting = data(start);
+  assert(!start.blobs?.length); assert.equal(collecting.frameCount, undefined); assert.equal(collecting.observation.phase, 'collecting');
+  evidence.collecting = collecting;
   const deadline = Date.now() + 23000;
   while (!scenes.length && Date.now() < deadline) await new Promise(r => setTimeout(r, 100));
   assert(scenes.length, 'No short-tail scene was delivered');

@@ -26,3 +26,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Icon artwork
+
+`assets/icon.webp` is an AI-generated illustration made by the package author. It
+combines a publicly shared depiction of the DeepSeek character with the Ego Lite
+name and mark. It is not an official DeepSeek or Ego Lite asset, and neither
+DeepSeek nor CitroLabs endorses this package. The Ego Lite logo and wordmark
+belong to CitroLabs; the Ego Lite project is MIT-licensed at
+<https://github.com/citrolabs/ego-lite>.

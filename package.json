@@ -13,7 +13,7 @@
   "os": ["win32", "darwin"],
   "main": "./src/index.ts",
   "cortico": {
-    "kind": "world", "api": 6, "displayName": "Ego 浏览器", "icon": "assets/icon.svg",
+    "kind": "world", "api": 6, "displayName": "Ego 浏览器", "icon": "assets/icon.webp",
     "tags": ["internet", "browser", "video", "external-setup", "high-cost"],
     "locales": { "en": { "displayName": "Ego Browser", "description": "Ego Browser — a browser built for AI, so your little fat fish (小肥鱼) browses, reads pages and watches videos more smoothly. For Cortico and Coopanion via the official ego-browser API: isolated task spaces, browsing, forms, screenshots, HTML5/Bilibili video frames, subtitles and danmaku. Requires an installed Ego Lite." } },
     "describe": "describe.json", "webUiClient": "dist/webui.js"

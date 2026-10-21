@@ -1,6 +1,6 @@
 # cortico-world-ego
 
-<img src="assets/icon.svg" width="96" height="96" alt="Ego 浏览器图标">
+<img src="assets/icon.webp" width="96" height="96" alt="Ego 浏览器图标">
 
 Ego 浏览器：专为 AI 打造的浏览器 World，让你家的小肥鱼上网、看图、看视频更顺手。让 Cortico 与 Coopanion（Coo）通过已安装的 [Ego Lite](https://github.com/citrolabs/ego-lite) 浏览网页、读取字幕和视频画面。World id 为 `ego`，契约为 world 6。
 

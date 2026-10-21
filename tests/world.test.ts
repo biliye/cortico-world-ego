@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { EgoWorld, normalizeUrl } from '../src/world.ts';
 import { EGO_DEFAULTS } from '../src/config.ts';
@@ -69,6 +69,24 @@ describe('contract and tools', () => {
 });
 
 describe('control boundaries', () => {
+  it('lets the operator reconnect after administrator rejection without a nonexistent Space id', async () => {
+    browser.next = { error: 'ego lite closed the connection because ego-browser is running as administrator', uncertain: true };
+    await call('tabs'); expect(world.status()).toMatchObject({ halted: false, connected: false, code: 'EGO_CLIENT_ELEVATED' });
+    await world.webUi().invoke!('control', 'connect', []);
+    expect(world.status()).toMatchObject({ halted: false, connected: true, reason: '' });
+  });
+  it('migrates a 0.1.0 elevated-client UNCERTAIN stop and connects again', async () => {
+    await world.stop(); await mkdir(join(dir, 'ego'), { recursive: true });
+    await writeFile(join(dir, 'ego', 'space.json'), JSON.stringify({ spaceName: world.status().spaceName, halted: true,
+      reason: 'UNCERTAIN: ego-browser exited 9: ego lite closed the connection because ego-browser is running as administrator' }));
+    await world.start(host()); expect(world.status()).toMatchObject({ halted: false, connected: true });
+  });
+  it('does not discard a user takeover stop when its resume fails because the helper is offline', async () => {
+    await call('handoff'); browser.next = { error: 'helper offline', code: 'EGO_HELPER_UNAVAILABLE', uncertain: false };
+    await expect(world.webUi().invoke!('control', 'resume', [])).rejects.toThrow('helper offline');
+    expect(world.status()).toMatchObject({ halted: true, code: 'EGO_TASK_SPACE_USER_IN_CONTROL' });
+    const count = browser.calls.length; await world.stop(); await world.start(host()); expect(browser.calls.length).toBe(count);
+  });
   it('stops all subsequent calls after user takeover', async () => {
     browser.next = { error: 'operator took over', code: 'EGO_TASK_SPACE_USER_IN_CONTROL' };
     expect((await call('tabs')).failed).toBe(true);

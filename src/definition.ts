@@ -4,6 +4,11 @@ import { EGO_TOOL_DECLS } from './tools.ts';
 import { EgoWorld } from './world.ts';
 export const EGO: WorldDefinition<EgoConfigSection> = {
   id: 'ego', label: 'Ego 浏览器', defaults: () => structuredClone(EGO_DEFAULTS),
+  configOptions: (kind, language) => kind !== 'ego-connection' ? [] : [
+    { value: 'auto', label: language.startsWith('zh') ? '自动选择（推荐）' : 'Automatic (recommended)' },
+    { value: 'helper', label: language.startsWith('zh') ? '普通权限助手（宿主可用管理员权限）' : 'Ordinary-permission helper (host can stay elevated)' },
+    { value: 'direct', label: language.startsWith('zh') ? '直接连接（宿主须用普通权限）' : 'Direct (ordinary-permission host)' },
+  ],
   create: ctx => new EgoWorld({ cfg: ctx.cfg, timezone: ctx.timezone, dataDir: ctx.dataDir, botDir: ctx.botDir }),
   describe: {
     tools: describeTools(EGO_TOOL_DECLS, {

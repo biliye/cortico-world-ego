@@ -4,6 +4,7 @@ import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { normalizeFailure } from './failures.ts';
 export interface BridgeReceipt {
   spaceId?: number;
   value?: any;
@@ -15,14 +16,14 @@ export interface EgoBridge {
   run(operation: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<BridgeReceipt>;
 }
 export class CliBridge implements EgoBridge {
-  constructor(private readonly options: { cliFile: string; dataDir: string; timeoutMs: () => number }) {}
+  constructor(private readonly options: { cliFile: string; dataDir: string; timeoutMs: () => number; runtimeUrl?: string }) {}
   async run(operation: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<BridgeReceipt> {
     signal?.throwIfAborted();
     const dir = resolve(this.options.dataDir, 'ego', 'rounds');
     await mkdir(dir, { recursive: true });
     const id = randomUUID();
     const input = join(dir, `${id}.mjs`), output = join(dir, `${id}.json`), screenshotFile = join(dir, `${id}.png`);
-    const runtime = new URL('./bridge-runtime.mjs', import.meta.url).href;
+    const runtime = this.options.runtimeUrl ?? new URL('./bridge-runtime.mjs', import.meta.url).href;
     const request = JSON.stringify({ operation, args: { ...args, screenshotFile } });
     await writeFile(input, `import { execute } from ${JSON.stringify(runtime)};\nimport { writeFile } from 'node:fs/promises';\nawait writeFile(${JSON.stringify(output)}, JSON.stringify(await execute(${request})), {mode:0o600});\n`, { mode: 0o600 });
     let stderr = '', launched = false;
@@ -46,13 +47,13 @@ export class CliBridge implements EgoBridge {
         if (signal?.aborted) abort();
         child.stderr?.on('data', (chunk) => { if (stderr.length < 8000) stderr += chunk.toString(); });
         child.on('error', (error) => finish(error));
-        child.on('exit', (exitCode) => finish(exitCode === 0 ? undefined : new Error(`ego-browser exited ${exitCode}: ${stderr.trim()}`)));
+        child.on('close', (exitCode) => finish(exitCode === 0 ? undefined : new Error(`ego-browser exited ${exitCode}: ${stderr.trim()}`)));
       });
       const receipt = JSON.parse(await readFile(output, 'utf8')) as BridgeReceipt;
       if (!receipt || typeof receipt !== 'object' || (!('value' in receipt) && !receipt.error)) throw new Error('Invalid Ego receipt');
       return receipt;
     } catch (error) {
-      return { error: error instanceof Error ? error.message : String(error), uncertain: (error as { uncertain?: boolean }).uncertain ?? launched };
+      return normalizeFailure({ error: error instanceof Error ? error.message : String(error), uncertain: (error as { uncertain?: boolean }).uncertain ?? launched });
     } finally {
       await Promise.allSettled([unlink(input), unlink(output), unlink(screenshotFile)]);
     }

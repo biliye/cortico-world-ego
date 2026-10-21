@@ -2,15 +2,19 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 import type { ToolDef, ToolOutcome, World, WorldHost, WorldWebUiDecl } from 'cortico/core/types.ts';
 import { nowIso } from 'cortico/core/util.ts';
 import { CliBridge, type EgoBridge, type BridgeReceipt } from './bridge.ts';
 import { bounded, egoConfigGroup, type EgoConfigSection } from './config.ts';
 import { EGO_TOOL_DECLS } from './tools.ts';
+import { AutoBridge, HelperBridge } from './helper-bridge.ts';
+import { prepareHelperLauncher } from './helper-launcher.ts';
+import { isConnectionFailure, normalizeFailure } from './failures.ts';
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 const STOP_CODES = /EGO_TASK_SPACE_(USER_IN_CONTROL|INACTIVE|NAME_IN_USE|NOT_FOUND|NOT_SELECTED|UNAVAILABLE)|EGO_TASK_HOST_DISCONNECTED/;
 interface Watch { page: string; frameId?: string; selector?: string; index?: number; since?: number; source?: string; generation: number }
-interface SavedState { spaceId?: number; halted: boolean; reason: string }
+interface SavedState { spaceId?: number; halted: boolean; reason: string; code?: string }
 export interface EgoWorldOptions {
   cfg: EgoConfigSection; timezone: string; dataDir: string; botDir: string; bridge?: EgoBridge;
 }
@@ -19,6 +23,11 @@ export class EgoWorld implements World {
   private readonly bridge: EgoBridge;
   private readonly spaceName: string;
   private readonly stateFile: string;
+  private readonly helper: HelperBridge;
+  private readonly helperDir: string;
+  private readonly transport?: AutoBridge;
+  private helperOnline = false;
+  private launcherFile = '';
   private saved: SavedState = { halted: false, reason: '' };
   private host?: WorldHost;
   private running = false;
@@ -33,14 +42,21 @@ export class EgoWorld implements World {
   constructor(private readonly options: EgoWorldOptions) {
     this.spaceName = options.cfg.spaceName || `Cortico-${createHash('sha256').update(options.botDir).digest('hex').slice(0, 12)}`;
     this.stateFile = join(options.dataDir, 'ego', 'space.json');
-    this.bridge = options.bridge ?? new CliBridge({ cliFile: options.cfg.cliFile, dataDir: options.dataDir,
-      timeoutMs: () => bounded(options.cfg.requestTimeoutMs, 5000, 120000, 45000) });
+    const timeoutMs = () => bounded(options.cfg.requestTimeoutMs, 5000, 120000, 45000);
+    this.helperDir = options.cfg.helperDir || join(options.dataDir, 'ego', 'helper');
+    this.helper = new HelperBridge(this.helperDir, timeoutMs);
+    if (options.bridge) this.bridge = options.bridge;
+    else {
+      this.transport = new AutoBridge(new CliBridge({ cliFile: options.cfg.cliFile, dataDir: options.dataDir, timeoutMs }), this.helper, options.cfg.connectionMode || 'auto');
+      this.bridge = this.transport;
+    }
   }
   envPromptVars(): Record<string, string> { return { 'ego.spaceName': this.spaceName }; }
   tools(): ToolDef[] {
     return EGO_TOOL_DECLS.map(spec => ({ ...spec, handler: (args, ctx) => this.serial(async () => {
       if (!this.running) return { text: 'Ego World is stopped.', failed: true };
       if (this.saved.halted) return { text: `Ego paused: ${this.saved.reason}\nThe operator must resume in the World panel.`, failed: true };
+      if (!this.connected) return { text: `Ego is not connected: ${this.saved.reason || 'Reconnect from the World panel.'}`, failed: true };
       ctx.signal?.throwIfAborted();
       try { return await this.invokeTool(spec.name.slice(4), args, ctx.signal); }
       catch (error) { return { text: error instanceof Error ? error.message : String(error), failed: true }; }
@@ -50,26 +66,45 @@ export class EgoWorld implements World {
     const zh = language.startsWith('zh');
     return {
       label: zh ? 'Ego 浏览器' : 'Ego Browser',
-      lamps: [{ label: 'Ego', state: !this.running ? 'offline' : this.saved.halted ? 'error' : this.connected ? 'online' : 'loading', hint: this.saved.reason || this.spaceName }],
+      lamps: [{ label: 'Ego', state: !this.running ? 'offline' : this.saved.halted || this.saved.reason ? 'error' : this.connected ? 'online' : 'loading', hint: this.saved.reason || this.spaceName }],
       badges: [{ label: 'Space', value: this.saved.spaceId ?? '—' }, { label: zh ? '观看' : 'Watching', value: this.watch?.page ?? '—' }],
       config: [egoConfigGroup(language)], panels: [{ id: 'control', title: zh ? '浏览器控制' : 'Browser control' }],
       promptDocs: [{ key: 'worlds.ego.envPrompt', title: zh ? 'Ego · 环境提示词' : 'Ego · Environment prompt', description: zh ? '浏览器使用时机与观看范围。' : 'Browser usage and video observation scope.', path: ENV_PROMPT_FILE,
         role: 'envPrompt', vars: [{ name: 'ego.spaceName', description: zh ? '本部署的 Space 名称' : 'This deployment’s Space name' }] }],
       invoke: (panel, method) => {
         if (panel !== 'control') throw new Error('Unknown panel');
-        if (method === 'status') return Promise.resolve(this.status());
+        if (method === 'status') return this.helper.probe().then(online => { this.helperOnline = online; return this.status(); });
         return this.serial(async () => {
           if (!this.running) throw new Error(zh ? '请先启用 World' : 'Enable the World first');
-          if (method === 'resume') {
-            if (!this.saved.spaceId) throw new Error(zh ? '尚未连接，请先点连接' : 'Connect first');
+          if (method === 'prepare-helper') {
+            const result = await prepareHelperLauncher(this.helperDir, this.options.cfg.cliFile);
+            this.launcherFile = result.launcherFile;
+          } else if (method === 'stop-helper') {
+            await this.helper.stop(); this.helperOnline = false;
+            if (this.transport?.selected === 'helper') {
+              this.cancelWatch(); this.connected = false;
+              if (!this.saved.halted) { this.saved.code = 'EGO_HELPER_UNAVAILABLE'; this.saved.reason = 'The operator stopped the ordinary-permission helper.'; await this.save(); }
+            }
+            await this.event('state', 'The operator stopped the ordinary-permission helper.', true);
+          } else if (method === 'open-helper-folder') {
+            if (!this.launcherFile || process.platform !== 'win32') throw new Error(zh ? '请先生成启动脚本' : 'Generate the launcher first');
+            await new Promise<void>((done, fail) => {
+              const child = spawn('explorer.exe', [this.helperDir], { windowsHide: true, stdio: 'ignore' });
+              child.once('spawn', done); child.once('error', fail);
+            });
+          } else if (method === 'resume') {
+            if (!this.saved.halted) throw new Error(zh ? '当前无需交还控制；连接失败请点重试连接。' : 'No control handoff to resume; retry the connection instead.');
             // No model tool reaches the takeover operation.
-            await this.command('resume', {}, undefined, true);
-            this.saved.halted = false; this.saved.reason = ''; this.connected = true;
+            await this.command(this.saved.spaceId ? 'resume' : 'connect', {}, undefined, true);
+            this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.connected = true;
             await this.save(); await this.event('state', 'The operator resumed this Ego Space.', true);
           } else if (method === 'connect') {
             if (this.saved.halted) throw new Error(this.saved.reason);
             await this.connect();
-          } else if (method === 'handoff') await this.handoff();
+          } else if (method === 'handoff') {
+            if (!this.connected || this.saved.halted) throw new Error(zh ? '连接后才能接管浏览器' : 'Connect before taking control');
+            await this.handoff();
+          }
           else if (method === 'pause') {
             const watch = this.watch; this.cancelWatch();
             if (watch && !this.saved.halted) await this.command('video', { ...watch, action: 'pause' });
@@ -79,12 +114,17 @@ export class EgoWorld implements World {
       },
     };
   }
-  status() { return { running: this.running, connected: this.connected, ...this.saved, spaceName: this.spaceName, watching: this.watch?.page ?? null }; }
+  status() { return { running: this.running, connected: this.connected, ...this.saved, spaceName: this.spaceName, watching: this.watch?.page ?? null,
+    connectionMode: this.options.cfg.connectionMode || 'auto', transport: this.transport?.selected ?? 'direct',
+    helperOnline: this.helperOnline, helperDir: this.helperDir, launcherFile: this.launcherFile, canPrepareHelper: process.platform === 'win32' }; }
   async start(host: WorldHost): Promise<void> {
     this.host = host; this.running = true; this.lifetime = new AbortController();
     try {
       const saved = JSON.parse(await readFile(this.stateFile, 'utf8'));
-      if (saved.spaceName === this.spaceName) this.saved = { spaceId: saved.spaceId, halted: !!saved.halted, reason: String(saved.reason ?? '') };
+      if (saved.spaceName === this.spaceName) {
+        const previous = normalizeFailure({ error: String(saved.reason ?? ''), code: saved.code, uncertain: !!saved.halted });
+        this.saved = { spaceId: saved.spaceId, halted: isConnectionFailure(previous.code) ? false : !!saved.halted, reason: String(saved.reason ?? ''), code: previous.code };
+      }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.saved = { halted: true, reason: `Cannot read Ego state: ${String(error)}` }; } }
     if (this.saved.halted) { await this.event('state', `Ego paused: ${this.saved.reason}`, true); return; }
     await this.serial(async () => {
@@ -110,27 +150,35 @@ export class EgoWorld implements World {
     await writeFile(this.stateFile, JSON.stringify({ ...this.saved, spaceName: this.spaceName }), { mode: 0o600 });
   }
   private async connect(): Promise<void> {
-    await this.command('connect', {}); this.connected = true;
+    await this.command('connect', {}); this.connected = true; this.saved.reason = ''; this.saved.code = undefined;
     await this.save(); await this.event('state', `Ego connected. Space ${this.saved.spaceId} (${this.spaceName}).`, true);
   }
   private async command(operation: string, args: Record<string, unknown>, signal?: AbortSignal, operatorResume = false): Promise<any> {
     if (this.saved.halted && !operatorResume) throw new Error(`Ego paused: ${this.saved.reason}`);
     signal?.throwIfAborted();
     const combined = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
-    const receipt: BridgeReceipt = await this.bridge.run(operation, { ...args, restoreMinimized: this.options.cfg.restoreMinimized, spaceId: this.saved.spaceId, spaceName: this.spaceName }, combined);
+    const receipt: BridgeReceipt = normalizeFailure(await this.bridge.run(operation, { ...args, restoreMinimized: this.options.cfg.restoreMinimized, spaceId: this.saved.spaceId, spaceName: this.spaceName }, combined));
     if (receipt.spaceId) { this.saved.spaceId = receipt.spaceId; await this.save(); }
     if (receipt.error) {
-      if (receipt.uncertain || STOP_CODES.test(receipt.code ?? receipt.error)) {
-        this.saved.halted = true; this.saved.reason = `${receipt.code ?? 'UNCERTAIN'}: ${receipt.error}`; this.cancelWatch(); this.connected = false;
+      if (isConnectionFailure(receipt.code)) {
+        if (operatorResume && this.saved.halted) {
+          this.saved.reason += `\n${receipt.error}`; this.connected = false; await this.save();
+          throw new Error(`${receipt.code}: ${receipt.error}`);
+        }
+        this.saved.halted = false; this.saved.reason = receipt.error; this.saved.code = receipt.code; this.cancelWatch(); this.connected = false;
+        await this.save(); await this.event('state', `Ego connection unavailable: ${receipt.code}: ${receipt.error}`, true);
+      } else if (receipt.uncertain || STOP_CODES.test(receipt.code ?? receipt.error)) {
+        this.saved.halted = true; this.saved.reason = `${receipt.code ?? 'UNCERTAIN'}: ${receipt.error}`; this.saved.code = receipt.code ?? 'UNCERTAIN'; this.cancelWatch(); this.connected = false;
         await this.save(); await this.event('state', `Ego stopped: ${this.saved.reason}`, true);
       }
       throw new Error(`${receipt.code ? `${receipt.code}: ` : ''}${receipt.error}`);
     }
+    if (this.transport?.selected === 'helper') this.helperOnline = true;
     return receipt.value;
   }
   private async handoff(): Promise<ToolOutcome> {
     this.cancelWatch(); await this.command('handoff', {});
-    this.saved.halted = true; this.saved.reason = 'Control was handed to the operator.'; this.connected = false;
+    this.saved.halted = true; this.saved.reason = 'Control was handed to the operator.'; this.saved.code = 'EGO_TASK_SPACE_USER_IN_CONTROL'; this.connected = false;
     await this.save(); await this.event('state', this.saved.reason, true);
     return { text: this.saved.reason };
   }

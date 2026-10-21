@@ -1,5 +1,9 @@
 # 更新日志
 
+## Unreleased
+
+- 环境提示词明确重复 `watch` 会清空当前采集、撤回未投递拼图，并从当前视频位置重新采集；下一批自动到来，查状态用 `inspect`，调参用 `tune`。
+
 ## 0.1.6
 
 - `ego_video watch` 可同时传 `windowSec` / `frameIntervalSec`，按窗口首尾自动推导最多 9 帧；不传继续使用扩展配置页的默认值，临时覆盖不写回设置。

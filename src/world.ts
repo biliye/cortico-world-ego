@@ -14,7 +14,7 @@ import { isConnectionFailure, normalizeFailure } from './failures.ts';
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 const STOP_CODES = /EGO_TASK_SPACE_(USER_IN_CONTROL|INACTIVE|NAME_IN_USE|NOT_FOUND|NOT_SELECTED|UNAVAILABLE)|EGO_TASK_HOST_DISCONNECTED/;
 interface Watch { page: string; frameId?: string; selector?: string; index?: number; since?: number; source?: string; generation: number; nextSceneAt: number }
-interface SavedState { spaceId?: number; halted: boolean; reason: string; code?: string }
+interface SavedState { spaceId?: number; halted: boolean; reason: string; code?: string; spaceMissing?: boolean }
 export interface EgoWorldOptions {
   cfg: EgoConfigSection; timezone: string; dataDir: string; botDir: string; bridge?: EgoBridge;
 }
@@ -96,11 +96,15 @@ export class EgoWorld implements World {
             if (!this.saved.halted) throw new Error(zh ? '当前无需交还控制；连接失败请点重试连接。' : 'No control handoff to resume; retry the connection instead.');
             // No model tool reaches the takeover operation.
             await this.command(this.saved.spaceId ? 'resume' : 'connect', {}, undefined, true);
-            this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.connected = true;
+            this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.saved.spaceMissing = false; this.connected = true;
             await this.save(); await this.event('state', 'The operator resumed this Ego Space.', true);
           } else if (method === 'connect') {
             if (this.saved.halted) throw new Error(this.saved.reason);
             await this.connect();
+          } else if (method === 'recreate-space') {
+            if (!this.saved.halted || !this.saved.spaceMissing || this.saved.code !== 'EGO_TASK_SPACE_NOT_FOUND' || !this.saved.spaceId) throw new Error(zh ? '只有确认旧浏览空间不存在时才能重新建立。' : 'Recreation requires a confirmed missing Space.');
+            // Operator-only action. Do not forget the old id until Ego returns a new one.
+            await this.connect(true);
           } else if (method === 'handoff') {
             if (!this.connected || this.saved.halted) throw new Error(zh ? '连接后才能接管浏览器' : 'Connect before taking control');
             await this.handoff();
@@ -123,7 +127,8 @@ export class EgoWorld implements World {
       const saved = JSON.parse(await readFile(this.stateFile, 'utf8'));
       if (saved.spaceName === this.spaceName) {
         const previous = normalizeFailure({ error: String(saved.reason ?? ''), code: saved.code, uncertain: !!saved.halted });
-        this.saved = { spaceId: saved.spaceId, halted: isConnectionFailure(previous.code) ? false : !!saved.halted, reason: String(saved.reason ?? ''), code: previous.code };
+        this.saved = { spaceId: saved.spaceId, halted: isConnectionFailure(previous.code) ? false : !!saved.halted, reason: String(saved.reason ?? ''), code: previous.code,
+          spaceMissing: saved.spaceMissing === true && previous.code === 'EGO_TASK_SPACE_NOT_FOUND' };
       }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.saved = { halted: true, reason: `Cannot read Ego state: ${String(error)}` }; } }
     if (this.saved.halted) { await this.event('state', `Ego paused: ${this.saved.reason}`, true); return; }
@@ -149,15 +154,15 @@ export class EgoWorld implements World {
     await mkdir(join(this.options.dataDir, 'ego'), { recursive: true });
     await writeFile(this.stateFile, JSON.stringify({ ...this.saved, spaceName: this.spaceName }), { mode: 0o600 });
   }
-  private async connect(): Promise<void> {
-    await this.command('connect', {}); this.connected = true; this.saved.reason = ''; this.saved.code = undefined;
-    await this.save(); await this.event('state', `Ego connected. Space ${this.saved.spaceId} (${this.spaceName}).`, true);
+  private async connect(byName = false): Promise<void> {
+    await this.command('connect', {}, undefined, byName, byName); this.connected = true; this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.saved.spaceMissing = false;
+    await this.save(); await this.event('state', `Ego connected. Space ${this.saved.spaceId} (${this.spaceName}).${byName ? ' The operator re-established the missing Space by its dedicated name. Old page labels and refs are invalid; use ego_tabs and reopen needed pages. Video watching has not resumed.' : ''}`, true);
   }
-  private async command(operation: string, args: Record<string, unknown>, signal?: AbortSignal, operatorResume = false): Promise<any> {
+  private async command(operation: string, args: Record<string, unknown>, signal?: AbortSignal, operatorResume = false, byName = false): Promise<any> {
     if (this.saved.halted && !operatorResume) throw new Error(`Ego paused: ${this.saved.reason}`);
     signal?.throwIfAborted();
     const combined = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
-    const receipt: BridgeReceipt = normalizeFailure(await this.bridge.run(operation, { ...args, restoreMinimized: this.options.cfg.restoreMinimized, spaceId: this.saved.spaceId, spaceName: this.spaceName }, combined));
+    const receipt: BridgeReceipt = normalizeFailure(await this.bridge.run(operation, { ...args, restoreMinimized: this.options.cfg.restoreMinimized, spaceId: byName ? undefined : this.saved.spaceId, spaceName: this.spaceName }, combined));
     if (receipt.spaceId) { this.saved.spaceId = receipt.spaceId; await this.save(); }
     if (receipt.error) {
       if (isConnectionFailure(receipt.code)) {
@@ -168,7 +173,8 @@ export class EgoWorld implements World {
         this.saved.halted = false; this.saved.reason = receipt.error; this.saved.code = receipt.code; this.cancelWatch(); this.connected = false;
         await this.save(); await this.event('state', `Ego connection unavailable: ${receipt.code}: ${receipt.error}`, true);
       } else if (receipt.uncertain || STOP_CODES.test(receipt.code ?? receipt.error)) {
-        this.saved.halted = true; this.saved.reason = `${receipt.code ?? 'UNCERTAIN'}: ${receipt.error}`; this.saved.code = receipt.code ?? 'UNCERTAIN'; this.cancelWatch(); this.connected = false;
+        this.saved.halted = true; this.saved.reason = `${receipt.code ?? 'UNCERTAIN'}: ${receipt.error}`; this.saved.code = receipt.code ?? 'UNCERTAIN';
+        this.saved.spaceMissing = receipt.code === 'EGO_TASK_SPACE_NOT_FOUND' && !receipt.uncertain; this.cancelWatch(); this.connected = false;
         await this.save(); await this.event('state', `Ego stopped: ${this.saved.reason}`, true);
       }
       throw new Error(`${receipt.code ? `${receipt.code}: ` : ''}${receipt.error}`);

@@ -69,6 +69,48 @@ describe('contract and tools', () => {
 });
 
 describe('control boundaries', () => {
+  it('replaces a stale helper reason with the exact missing-Space failure and waits for the operator', async () => {
+    (world as any).saved = { spaceId: 3, halted: false, reason: 'The operator stopped the ordinary-permission helper.', code: 'EGO_HELPER_UNAVAILABLE' };
+    browser.next = { error: 'task space not found: 3', uncertain: false };
+    const count = browser.calls.length;
+    await expect(world.webUi().invoke!('control', 'connect', [])).rejects.toThrow('task space not found: 3');
+    expect(world.status()).toMatchObject({ spaceId: 3, connected: false, halted: true, code: 'EGO_TASK_SPACE_NOT_FOUND', spaceMissing: true });
+    expect(world.status().reason).not.toContain('operator stopped'); expect(browser.calls).toHaveLength(count + 1);
+    expect((await call('tabs')).failed).toBe(true); expect(browser.calls).toHaveLength(count + 1);
+    await world.stop(); await world.start(host()); expect(browser.calls).toHaveLength(count + 1);
+  });
+  it('lets only the operator reconnect by the configured name after a confirmed missing Space', async () => {
+    browser.next = { error: 'task space not found: 1', uncertain: false }; await call('tabs');
+    const previous = browser.calls.length;
+    browser.next = { spaceId: 7, value: { pages: [] } };
+    await world.webUi().invoke!('control', 'recreate-space', []);
+    expect(browser.calls).toHaveLength(previous + 1);
+    expect(browser.calls.at(-1)).toMatchObject({ op: 'connect', args: { spaceName: world.status().spaceName, spaceId: undefined } });
+    expect(world.status()).toMatchObject({ spaceId: 7, connected: true, halted: false, spaceMissing: false, watching: null });
+    expect(world.tools().some(t => /recreate|resume/.test(t.name))).toBe(false);
+    await expect(world.webUi().invoke!('control', 'recreate-space', [])).rejects.toThrow('只有确认');
+  });
+  it('never recreates after user takeover or uncertain effects, including an uncertain NOT_FOUND receipt', async () => {
+    await call('handoff'); const count = browser.calls.length;
+    await expect(world.webUi().invoke!('control', 'recreate-space', [])).rejects.toThrow('只有确认');
+    expect(browser.calls).toHaveLength(count);
+    await world.webUi().invoke!('control', 'resume', []);
+    browser.next = { error: 'task space not found: 1', code: 'EGO_TASK_SPACE_NOT_FOUND', uncertain: true }; await call('tabs');
+    const after = browser.calls.length;
+    expect(world.status().spaceMissing).toBe(false);
+    await expect(world.webUi().invoke!('control', 'recreate-space', [])).rejects.toThrow('只有确认');
+    expect(browser.calls).toHaveLength(after);
+  });
+  it('preserves the missing id when its helper is offline and refuses to claim an occupied name', async () => {
+    browser.next = { error: 'task space not found: 1', uncertain: false }; await call('tabs');
+    browser.next = { error: 'helper offline', code: 'EGO_HELPER_UNAVAILABLE', uncertain: false };
+    await expect(world.webUi().invoke!('control', 'recreate-space', [])).rejects.toThrow('helper offline');
+    expect(world.status()).toMatchObject({ spaceId: 1, code: 'EGO_TASK_SPACE_NOT_FOUND', spaceMissing: true, halted: true });
+    browser.next = { error: 'name belongs to the operator', code: 'EGO_TASK_SPACE_NAME_IN_USE', uncertain: false };
+    await expect(world.webUi().invoke!('control', 'recreate-space', [])).rejects.toThrow('NAME_IN_USE');
+    expect(world.status()).toMatchObject({ spaceId: 1, code: 'EGO_TASK_SPACE_NAME_IN_USE', halted: true, spaceMissing: false });
+    expect(browser.calls.at(-1)?.op).toBe('connect');
+  });
   it('lets the operator reconnect after administrator rejection without a nonexistent Space id', async () => {
     browser.next = { error: 'ego lite closed the connection because ego-browser is running as administrator', uncertain: true };
     await call('tabs'); expect(world.status()).toMatchObject({ halted: false, connected: false, code: 'EGO_CLIENT_ELEVATED' });

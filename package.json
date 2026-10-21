@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-ego",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "author": { "name": "筆離嘢" },
   "description": "Ego Lite 浏览器 World：Cortico 与 Coopanion 共用官方 ego-browser 接口，在独立 Space 中浏览网页、点击填表、截图，以及观看 HTML5 / B 站视频的画面与字幕。需先安装 Ego Lite。",

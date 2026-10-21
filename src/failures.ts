@@ -10,6 +10,8 @@ export function normalizeFailure(receipt: BridgeReceipt): BridgeReceipt {
   }
   if (/\bENOENT\b/.test(error) && !receipt.uncertain) return { ...receipt, code: 'EGO_CLI_NOT_FOUND', uncertain: false };
   if (/Failed to connect to ego_cli bootstrap/i.test(error)) return { ...receipt, code: 'EGO_BROWSER_UNAVAILABLE', uncertain: false };
+  // Older Ego versions return this exact message without a structured control code.
+  if (!receipt.uncertain && /^task space not found:\s*\d+\s*$/i.test(error)) return { ...receipt, code: 'EGO_TASK_SPACE_NOT_FOUND' };
   return receipt;
 }
 export function isConnectionFailure(code?: string): boolean {

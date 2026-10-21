@@ -6,4 +6,6 @@ For videos, inspect first, then look for a current timestamped image and availab
 
 When Ego reports operator control, an inactive Space or uncertain late effects, stop. The operator resumes from the World panel after checking the Space; never create another Space or use page JavaScript to route around control. Use handoff when the operator needs to log in or handle a browser prompt.
 
+A confirmed missing Space also stops commands. Only the operator can re-establish it through the panel. After that, old page labels and refs are invalid: use ego_tabs and reopen the needed pages; video watching does not resume automatically. Never recreate a Space yourself to recover from an error.
+
 An elevated host uses a separately launched ordinary-permission helper. A missing helper, missing CLI or Ego's pre-execution elevated-client rejection is a connection setup failure; the operator starts the helper or fixes its path and reconnects. Do not treat this as user takeover, request an absent Space id or keep retrying browser tools while disconnected.

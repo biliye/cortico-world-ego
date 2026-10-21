@@ -16,3 +16,10 @@ it('shows video controls only while watching and supports English status text', 
   expect(panelView({ ...base, connected: true, watching: 'p1' }).canPause).toBe(true);
   expect(panelView({ ...base, connected: true }, false).title).toBe('Browser connected');
 });
+it('offers explicit recreation for a confirmed missing Space rather than a helper retry or takeover', () => {
+  const status = { ...base, spaceId: 3, halted: true, spaceMissing: true, code: 'EGO_TASK_SPACE_NOT_FOUND', transport: 'helper' as const, helperOnline: true };
+  expect(panelView(status)).toMatchObject({ title: '浏览空间已失效', canConnect: false, canResume: false, canRecreate: true });
+  expect(panelView({ ...status, helperOnline: false }).canRecreate).toBe(false);
+  expect(panelView({ ...status, spaceMissing: false }).canRecreate).toBe(false);
+  expect(panelView({ ...status, code: 'EGO_TASK_SPACE_NAME_IN_USE' })).toMatchObject({ title: '浏览空间名称已被占用', canResume: false, canRecreate: false });
+});

@@ -16,6 +16,12 @@ it('classifies the exact administrator rejection as a pre-execution connection f
 it('does not replace a real user-control stop with an administrator error quoted in diagnostics', () => {
   expect(normalizeFailure({ code: 'EGO_TASK_SPACE_USER_IN_CONTROL', error: `User control. Earlier error: ${denied}`, uncertain: true }).code).toBe('EGO_TASK_SPACE_USER_IN_CONTROL');
 });
+it('recognizes only a definite exact missing-Space message from older Ego clients', () => {
+  expect(normalizeFailure({ error: 'task space not found: 3', uncertain: false }).code).toBe('EGO_TASK_SPACE_NOT_FOUND');
+  expect(normalizeFailure({ error: 'task space not found: 3', uncertain: true }).code).toBeUndefined();
+  expect(normalizeFailure({ error: 'Page says: task space not found: 3', uncertain: false }).code).toBeUndefined();
+  expect(normalizeFailure({ error: 'task space not found: 3', code: 'EGO_TASK_SPACE_USER_IN_CONTROL' }).code).toBe('EGO_TASK_SPACE_USER_IN_CONTROL');
+});
 it('refuses to start an elevated helper before creating the endpoint', async () => {
   await expect(startHelper({ dir, checkElevated: async () => true })).rejects.toThrow('EGO_CLIENT_ELEVATED');
   await expect(readFile(join(dir, 'endpoint.json'))).rejects.toMatchObject({ code: 'ENOENT' });

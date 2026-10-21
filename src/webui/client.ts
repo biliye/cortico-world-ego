@@ -44,6 +44,7 @@ export function mount(ctx: WebUiPanelContext): void {
     ]));
     actions.replaceChildren();
     if (view.canConnect) actions.append(button(say('连接浏览器', 'Connect browser'), 'connect', true));
+    if (view.canRecreate) actions.append(button(say('重新建立浏览空间', 'Recreate browser Space'), 'recreate-space', true));
     if (view.canResume) actions.append(button(say(status.code === 'EGO_TASK_SPACE_USER_IN_CONTROL' ? '交还 bot' : '已核对，恢复操作', 'Checked: return control'), 'resume', true));
     if (view.canHandoff) actions.append(button(say('我要操作浏览器', 'Take browser control'), 'handoff'));
     if (view.canPause) actions.append(button(say('暂停视频观看', 'Pause video watching'), 'pause'));
@@ -63,6 +64,7 @@ export function mount(ctx: WebUiPanelContext): void {
   async function act(method: string): Promise<void> {
     if (busy) return;
     if (method === 'stop-helper' && !await ui.confirm({ title: say('停止普通权限助手？', 'Stop the helper?'), body: say('通过该助手的浏览器连接会断开。', 'Browser connections using this helper will disconnect.') })) return;
+    if (method === 'recreate-space' && !await ui.confirm({ title: say('重新建立浏览空间？', 'Recreate the browser Space?'), body: say('Ego 已确认找不到旧空间。将按本 bot 的专属名称重新连接或建立空间；旧页面标签将失效，需要重新打开网页。视频不会自动续看。', 'Ego confirmed the old Space is missing. Connect or create a Space using this bot’s dedicated name. Reopen pages; video watching will not resume automatically.') })) return;
     busy = true; revision++; actionError = ''; if (current) render(current);
     try { const status = await ctx.invoke<EgoPanelStatus>(method); render(status); await ctx.refresh(); }
     catch (error) {

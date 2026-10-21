@@ -1,6 +1,6 @@
 export interface EgoPanelStatus {
   running: boolean; connected: boolean; halted: boolean; reason: string; code?: string;
-  spaceId?: number; spaceName: string; watching: string | null;
+  spaceId?: number; spaceName: string; watching: string | null; spaceMissing?: boolean;
   connectionMode: 'auto' | 'direct' | 'helper'; transport: 'direct' | 'helper';
   helperOnline: boolean; helperDir: string; launcherFile: string; canPrepareHelper: boolean;
 }
@@ -8,9 +8,17 @@ export function panelView(status: EgoPanelStatus, zh = true) {
   const say = (cn: string, en: string) => zh ? cn : en;
   const directBlocked = status.connectionMode === 'direct' && status.code === 'EGO_CLIENT_ELEVATED';
   const needsHelper = status.connectionMode === 'helper' || status.transport === 'helper' || (!directBlocked && /^EGO_(CLIENT_ELEVATED|HELPER_)/.test(status.code ?? ''));
+  const missingSpace = status.code === 'EGO_TASK_SPACE_NOT_FOUND' && status.spaceMissing === true;
+  const nameInUse = status.code === 'EGO_TASK_SPACE_NAME_IN_USE';
   let title: string, detail: string;
   if (!status.running) { title = say('World 已停用', 'World is disabled'); detail = say('启用 Ego 浏览器 World 后再连接。', 'Enable the Ego Browser World to connect.'); }
-  else if (status.halted) {
+  else if (missingSpace) {
+    title = say('浏览空间已失效', 'Browser Space is missing');
+    detail = say(`Ego 找不到之前的 Space ${status.spaceId ?? ''}。确认后点击「重新建立浏览空间」，按专属名称连接；旧页面标签失效，需要重新打开网页，视频不会自动续看。`, `Ego cannot find Space ${status.spaceId ?? ''}. Recreate the dedicated Space after checking. Old page labels are invalid; reopen pages and restart watching.`);
+  } else if (nameInUse) {
+    title = say('浏览空间名称已被占用', 'Space name is already in use');
+    detail = say('请在配置中改用本 bot 独有的浏览空间名称，再重启 World。不会接管占用该名称的空间。', 'Choose a unique Space name in settings, then restart this World. The existing Space will not be claimed.');
+  } else if (status.halted) {
     const user = status.code === 'EGO_TASK_SPACE_USER_IN_CONTROL';
     title = user ? say('浏览器由你操作', 'You control the browser') : say('操作已暂停，等待确认', 'Automation paused for review');
     detail = user ? say('操作完成后，点击「交还 bot」。之后需要重新发起视频观看。', 'When finished, return control to the bot. Restart video watching separately.')
@@ -32,7 +40,8 @@ export function panelView(status: EgoPanelStatus, zh = true) {
   } else { title = say('尚未连接 Ego', 'Ego is not connected'); detail = say('先打开 Ego Lite，再点击「连接浏览器」。', 'Open Ego Lite, then connect the browser.'); }
   return { title, detail, needsHelper,
     canConnect: status.running && !status.halted && !status.connected && !directBlocked && (!needsHelper || status.helperOnline),
-    canResume: status.running && status.halted,
+    canResume: status.running && status.halted && !missingSpace && !nameInUse,
+    canRecreate: status.running && status.halted && missingSpace && !!status.spaceId && (!needsHelper || status.helperOnline),
     canHandoff: status.running && status.connected && !status.halted,
     canPause: status.running && !!status.watching && !status.halted,
     canPrepare: status.running && status.canPrepareHelper,

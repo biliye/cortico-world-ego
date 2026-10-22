@@ -1,6 +1,6 @@
 export interface EgoPanelStatus {
   running: boolean; connected: boolean; halted: boolean; reason: string; code?: string;
-  spaceId?: number; spaceName: string; watching: string | null; spaceMissing?: boolean;
+  spaceId?: number; spaceName: string; watching: string | null; spaceMissing?: boolean; autoRecovering?: boolean;
   sampling?: { batch: number; current: { windowSec: number; frameIntervalSec: number; plannedFrames: number }; pending: { windowSec: number; frameIntervalSec: number; plannedFrames: number } | null } | null;
   connectionMode: 'auto' | 'direct' | 'helper'; transport: 'direct' | 'helper';
   helperOnline: boolean; helperDir: string; launcherFile: string; canPrepareHelper: boolean;
@@ -14,8 +14,10 @@ export function panelView(status: EgoPanelStatus, zh = true) {
   let title: string, detail: string;
   if (!status.running) { title = say('World 已停用', 'World is disabled'); detail = say('启用 Ego 浏览器 World 后再连接。', 'Enable the Ego Browser World to connect.'); }
   else if (missingSpace) {
-    title = say('浏览空间已失效', 'Browser Space is missing');
-    detail = say(`Ego 找不到之前的 Space ${status.spaceId ?? ''}。确认后点击「重新建立浏览空间」，按专属名称连接；旧页面标签失效，需要重新打开网页，视频不会自动续看。`, `Ego cannot find Space ${status.spaceId ?? ''}. Recreate the dedicated Space after checking. Old page labels are invalid; reopen pages and restart watching.`);
+    title = status.autoRecovering ? say('正在自动重建浏览空间', 'Automatically recovering browser Space') : say('浏览空间已失效', 'Browser Space is missing');
+    detail = status.autoRecovering
+      ? say(`Ego 找不到之前的 Space ${status.spaceId ?? ''}，正在按本 bot 的专属名称自动重建。请保持 Ego 和助手运行，失败后会延迟重试。旧网页需要重新打开，视频不会自动续看。`, `Ego cannot find Space ${status.spaceId ?? ''}. Automatic recovery uses this bot's dedicated name and retries with backoff. Keep Ego and its helper running. Reopen pages and restart watching afterwards.`)
+      : say(`Ego 找不到之前的 Space ${status.spaceId ?? ''}。点击「重新建立浏览空间」可立即重试；旧页面标签失效，需要重新打开网页，视频不会自动续看。`, `Ego cannot find Space ${status.spaceId ?? ''}. Recreate the dedicated Space to retry now. Old page labels are invalid; reopen pages and restart watching.`);
   } else if (nameInUse) {
     title = say('浏览空间名称已被占用', 'Space name is already in use');
     detail = say('请在配置中改用本 bot 独有的浏览空间名称，再重启 World。不会接管占用该名称的空间。', 'Choose a unique Space name in settings, then restart this World. The existing Space will not be claimed.');

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { videoOperation } from '../src/video-page.mjs';
@@ -13,12 +13,14 @@ import { nullLogger } from 'cortico/core/util.ts';
 class Browser implements EgoBridge {
   calls: Array<{ op: string; args: Record<string, unknown> }> = [];
   next?: BridgeReceipt;
+  replies: BridgeReceipt[] = [];
   time = 10;
   ended = false;
   updatedAt = Date.now();
   async run(op: string, args: Record<string, unknown>): Promise<BridgeReceipt> {
     this.calls.push({ op, args });
     if (this.next) { const next = this.next; this.next = undefined; return next; }
+    if (this.replies.length) return this.replies.shift()!;
     if (op === 'video') { if (!this.ended) this.time += (Date.now() - this.updatedAt) / 1000; this.updatedAt = Date.now(); const time = this.time;
       const samplePending = typeof args.targetTime === 'number' && time < args.targetTime - 0.02 && !this.ended;
       return { spaceId: 1, value: { found: true, time, playbackRate: 1, source: 'video1', frameId: 'frame1', ended: this.ended, paused: this.ended || args.action === 'pause', samplePending,
@@ -165,24 +167,26 @@ describe('contract and tools', () => {
 });
 
 describe('control boundaries', () => {
-  it('replaces a stale helper reason with the exact missing-Space failure and waits for the operator', async () => {
+  it('automatically reconnects a stale id by its dedicated name and clears the old helper reason', async () => {
     (world as any).saved = { spaceId: 3, halted: false, reason: 'The operator stopped the ordinary-permission helper.', code: 'EGO_HELPER_UNAVAILABLE' };
     browser.next = { error: 'task space not found: 3', uncertain: false };
     const count = browser.calls.length;
-    await expect(world.webUi().invoke!('control', 'connect', [])).rejects.toThrow('task space not found: 3');
-    expect(world.status()).toMatchObject({ spaceId: 3, connected: false, halted: true, code: 'EGO_TASK_SPACE_NOT_FOUND', spaceMissing: true });
-    expect(world.status().reason).not.toContain('operator stopped'); expect(browser.calls).toHaveLength(count + 1);
-    expect((await call('tabs')).failed).toBe(true); expect(browser.calls).toHaveLength(count + 1);
-    await world.stop(); await world.start(host()); expect(browser.calls).toHaveLength(count + 1);
+    await world.webUi().invoke!('control', 'connect', []);
+    expect(world.status()).toMatchObject({ spaceId: 1, connected: true, halted: false, spaceMissing: false, reason: '', autoRecovering: false });
+    expect(browser.calls).toHaveLength(count + 2);
+    expect(browser.calls.at(-1)).toMatchObject({ op: 'connect', args: { spaceName: world.status().spaceName, spaceId: undefined } });
+    expect(events.at(-1)?.text).toContain('Automatically re-established');
   });
-  it('lets only the operator reconnect by the configured name after a confirmed missing Space', async () => {
-    browser.next = { error: 'task space not found: 1', uncertain: false }; await call('tabs');
+  it('recovers a confirmed missing Space without replaying the failed click and persists the new id', async () => {
     const previous = browser.calls.length;
-    browser.next = { spaceId: 7, value: { pages: [] } };
-    await world.webUi().invoke!('control', 'recreate-space', []);
-    expect(browser.calls).toHaveLength(previous + 1);
+    browser.replies = [{ error: 'task space not found: 1', uncertain: false }, { spaceId: 7, value: { pages: [] } }];
+    const result = await call('click', { page: 'p1', selector: '@1' });
+    expect(result.failed).toBe(true); expect(result.text).toContain('automatically re-established');
+    expect(result.text).toContain('failed operation was not replayed'); expect(result.text).toContain('Old page labels and refs are invalid');
+    expect(browser.calls.slice(previous).map(c => c.op)).toEqual(['click', 'connect']);
     expect(browser.calls.at(-1)).toMatchObject({ op: 'connect', args: { spaceName: world.status().spaceName, spaceId: undefined } });
     expect(world.status()).toMatchObject({ spaceId: 7, connected: true, halted: false, spaceMissing: false, watching: null });
+    expect(JSON.parse(await readFile(join(dir, 'ego', 'space.json'), 'utf8'))).toMatchObject({ spaceId: 7, halted: false, spaceMissing: false });
     expect(world.tools().some(t => /recreate|resume/.test(t.name))).toBe(false);
     await expect(world.webUi().invoke!('control', 'recreate-space', [])).rejects.toThrow('只有确认');
   });
@@ -197,15 +201,110 @@ describe('control boundaries', () => {
     await expect(world.webUi().invoke!('control', 'recreate-space', [])).rejects.toThrow('只有确认');
     expect(browser.calls).toHaveLength(after);
   });
-  it('preserves the missing id when its helper is offline and refuses to claim an occupied name', async () => {
-    browser.next = { error: 'task space not found: 1', uncertain: false }; await call('tabs');
-    browser.next = { error: 'helper offline', code: 'EGO_HELPER_UNAVAILABLE', uncertain: false };
-    await expect(world.webUi().invoke!('control', 'recreate-space', [])).rejects.toThrow('helper offline');
-    expect(world.status()).toMatchObject({ spaceId: 1, code: 'EGO_TASK_SPACE_NOT_FOUND', spaceMissing: true, halted: true });
+  it('backs off automatic recovery while its helper is offline, then recovers without a panel action', async () => {
+    vi.useFakeTimers();
+    browser.replies = [{ error: 'task space not found: 1' }, { error: 'helper offline', code: 'EGO_HELPER_UNAVAILABLE' }];
+    expect((await call('tabs')).text).toContain('Automatic Space recovery failed');
+    expect(world.status()).toMatchObject({ spaceId: 1, code: 'EGO_TASK_SPACE_NOT_FOUND', spaceMissing: true, halted: true, autoRecovering: true });
+    const count = browser.calls.length;
+    browser.next = { error: 'helper still offline', code: 'EGO_HELPER_UNAVAILABLE' };
+    await vi.advanceTimersByTimeAsync(4999); await (world as any).queue; expect(browser.calls).toHaveLength(count);
+    await vi.advanceTimersByTimeAsync(1); await (world as any).queue; expect(browser.calls).toHaveLength(count + 1);
+    expect(world.status().reason).toBe('EGO_TASK_SPACE_NOT_FOUND: task space not found: 1\nhelper still offline');
+    browser.next = { spaceId: 8, value: { pages: [] } };
+    await vi.advanceTimersByTimeAsync(9999); await (world as any).queue; expect(browser.calls).toHaveLength(count + 1);
+    await vi.advanceTimersByTimeAsync(1); await (world as any).queue;
+    expect(world.status()).toMatchObject({ spaceId: 8, connected: true, halted: false, autoRecovering: false });
+    await vi.advanceTimersByTimeAsync(120000); expect(browser.calls).toHaveLength(count + 2);
+  });
+  it('keeps the manual recovery fallback but refuses to claim an occupied name', async () => {
+    vi.useFakeTimers();
+    browser.replies = [{ error: 'task space not found: 1' }, { error: 'helper offline', code: 'EGO_HELPER_UNAVAILABLE' }];
+    await call('tabs');
     browser.next = { error: 'name belongs to the operator', code: 'EGO_TASK_SPACE_NAME_IN_USE', uncertain: false };
     await expect(world.webUi().invoke!('control', 'recreate-space', [])).rejects.toThrow('NAME_IN_USE');
     expect(world.status()).toMatchObject({ spaceId: 1, code: 'EGO_TASK_SPACE_NAME_IN_USE', halted: true, spaceMissing: false });
     expect(browser.calls.at(-1)?.op).toBe('connect');
+    const count = browser.calls.length;
+    await vi.advanceTimersByTimeAsync(120000); await (world as any).queue; await call('tabs');
+    expect(browser.calls).toHaveLength(count);
+  });
+  it('stops pending recovery if establishing the replacement has uncertain effects', async () => {
+    vi.useFakeTimers();
+    browser.replies = [{ error: 'task space not found: 1' }, { spaceId: 9, error: 'connection interrupted', uncertain: true }];
+    await call('tabs');
+    expect(world.status()).toMatchObject({ spaceId: 1, halted: true, spaceMissing: false, autoRecovering: false, code: 'UNCERTAIN' });
+    const count = browser.calls.length;
+    await vi.advanceTimersByTimeAsync(120000); await (world as any).queue;
+    expect((await call('tabs')).text).toContain('operator must resume'); expect(browser.calls).toHaveLength(count);
+  });
+  it('caps retry backoff at 60 seconds instead of looping on every tool call', async () => {
+    vi.useFakeTimers();
+    const offline = { error: 'helper offline', code: 'EGO_HELPER_UNAVAILABLE' };
+    browser.replies = [{ error: 'task space not found: 1' }, ...Array.from({ length: 8 }, () => offline)];
+    await call('tabs');
+    let count = browser.calls.length;
+    for (const delay of [5000, 10000, 20000, 40000, 60000, 60000]) {
+      await call('tabs'); expect(browser.calls).toHaveLength(count);
+      await vi.advanceTimersByTimeAsync(delay - 1); await (world as any).queue; expect(browser.calls).toHaveLength(count);
+      await vi.advanceTimersByTimeAsync(1); await (world as any).queue; expect(browser.calls).toHaveLength(++count);
+    }
+  });
+  it('does not start recovery after the World is stopped during a missing-Space response', async () => {
+    vi.useFakeTimers();
+    let reply!: (value: BridgeReceipt) => void, started!: () => void;
+    const pending = new Promise<BridgeReceipt>(resolve => { reply = resolve; });
+    const invoked = new Promise<void>(resolve => { started = resolve; });
+    browser.run = async (op, args) => { browser.calls.push({ op, args }); started(); return pending; };
+    const result = call('tabs'); await invoked;
+    const stopping = world.stop(); reply({ error: 'task space not found: 1' });
+    expect((await result).failed).toBe(true); await stopping;
+    const count = browser.calls.length;
+    await vi.advanceTimersByTimeAsync(120000); expect(browser.calls).toHaveLength(count);
+    expect(world.status()).toMatchObject({ running: false, connected: false, autoRecovering: false });
+  });
+  it('recovers a missing id discovered during startup, and migrates the old persisted missing stop', async () => {
+    await world.stop();
+    browser.replies = [{ error: 'task space not found: 1' }, { spaceId: 7, value: { pages: [] } }];
+    await world.start(host()); expect(world.status()).toMatchObject({ spaceId: 7, connected: true, halted: false });
+    await world.stop();
+    await writeFile(join(dir, 'ego', 'space.json'), JSON.stringify({ spaceName: world.status().spaceName, spaceId: 3,
+      halted: true, spaceMissing: true, code: 'EGO_TASK_SPACE_NOT_FOUND', reason: 'EGO_TASK_SPACE_NOT_FOUND: task space not found: 3' }));
+    const count = browser.calls.length;
+    await world.start(host());
+    expect(browser.calls).toHaveLength(count + 1);
+    expect(browser.calls.at(-1)).toMatchObject({ op: 'connect', args: { spaceId: undefined } });
+    expect(world.status()).toMatchObject({ connected: true, halted: false, spaceMissing: false });
+  });
+  it.each(['EGO_TASK_SPACE_INACTIVE', 'EGO_TASK_HOST_DISCONNECTED', 'EGO_TASK_SPACE_NAME_IN_USE'])('never recreates for %s', async (code: string) => {
+    vi.useFakeTimers(); browser.next = { error: code, code }; await call('tabs');
+    const count = browser.calls.length;
+    await vi.advanceTimersByTimeAsync(120000); await (world as any).queue;
+    await world.stop(); await world.start(host()); await call('tabs');
+    expect(browser.calls).toHaveLength(count); expect(world.status().autoRecovering).toBe(false);
+  });
+  it('cancels recovery retries when the World or helper is explicitly stopped', async () => {
+    vi.useFakeTimers();
+    browser.replies = [{ error: 'task space not found: 1' }, { error: 'helper offline', code: 'EGO_HELPER_UNAVAILABLE' }];
+    await call('tabs');
+    vi.spyOn((world as any).helper, 'stop').mockResolvedValue(undefined);
+    await world.webUi().invoke!('control', 'stop-helper', []);
+    let count = browser.calls.length;
+    await vi.advanceTimersByTimeAsync(120000); await (world as any).queue; expect(browser.calls).toHaveLength(count);
+    browser.next = { error: 'helper offline', code: 'EGO_HELPER_UNAVAILABLE' };
+    await world.stop(); await world.start(host()); expect(world.status().autoRecovering).toBe(true);
+    await world.stop(); count = browser.calls.length;
+    await vi.advanceTimersByTimeAsync(120000); expect(browser.calls).toHaveLength(count);
+  });
+  it('withdraws old scenes and stops watching when a Space is automatically re-established', async () => {
+    vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });
+    for (let i = 0; i < 15; i++) { await vi.advanceTimersByTimeAsync(1000); await (world as any).queue; }
+    expect(deferred.length).toBeGreaterThan(0);
+    browser.replies = [{ error: 'task space not found: 1' }, { spaceId: 7, value: { pages: [] } }];
+    await call('tabs'); expect(world.status()).toMatchObject({ spaceId: 7, connected: true, watching: null });
+    for (const scene of deferred) expect(await scene.render()).toBeNull();
+    const count = browser.calls.length;
+    await vi.advanceTimersByTimeAsync(120000); await (world as any).queue; expect(browser.calls).toHaveLength(count);
   });
   it('lets the operator reconnect after administrator rejection without a nonexistent Space id', async () => {
     browser.next = { error: 'ego lite closed the connection because ego-browser is running as administrator', uncertain: true };

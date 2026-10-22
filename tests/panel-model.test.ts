@@ -23,3 +23,9 @@ it('offers explicit recreation for a confirmed missing Space rather than a helpe
   expect(panelView({ ...status, spaceMissing: false }).canRecreate).toBe(false);
   expect(panelView({ ...status, code: 'EGO_TASK_SPACE_NAME_IN_USE' })).toMatchObject({ title: '浏览空间名称已被占用', canResume: false, canRecreate: false });
 });
+it('explains automatic recovery while preserving the manual fallback and control boundary', () => {
+  const view = panelView({ ...base, spaceId: 3, halted: true, spaceMissing: true, code: 'EGO_TASK_SPACE_NOT_FOUND', autoRecovering: true });
+  expect(view).toMatchObject({ title: '正在自动重建浏览空间', canRecreate: true, canResume: false, canConnect: false });
+  expect(view.detail).toContain('失败后会延迟重试');
+  expect(panelView({ ...base, spaceId: 3, halted: true, spaceMissing: true, code: 'EGO_TASK_SPACE_NOT_FOUND', autoRecovering: true }, false).title).toBe('Automatically recovering browser Space');
+});

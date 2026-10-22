@@ -21,6 +21,7 @@ interface Watch {
   completed?: boolean; backpressured?: boolean;
 }
 const MAX_PENDING_SCENES = 4;
+const SPACE_RESET_HINT = 'Old page labels and refs are invalid; use ego_tabs and reopen needed pages. Video watching has not resumed. The failed operation was not replayed.';
 interface SavedState { spaceId?: number; halted: boolean; reason: string; code?: string; spaceMissing?: boolean }
 export interface EgoWorldOptions {
   cfg: EgoConfigSection; timezone: string; dataDir: string; botDir: string; bridge?: EgoBridge;
@@ -42,6 +43,9 @@ export class EgoWorld implements World {
   private queue: Promise<unknown> = Promise.resolve();
   private lifetime = new AbortController();
   private timer?: ReturnType<typeof setTimeout>;
+  private recoveryTimer?: ReturnType<typeof setTimeout>;
+  private recoveryDelay = 5000;
+  private recoveringSpace = false;
   private watch?: Watch;
   private generation = 0;
   private pendingScenes = new Set<{ page: string; outcome?: ToolOutcome }>();
@@ -61,7 +65,7 @@ export class EgoWorld implements World {
   tools(): ToolDef[] {
     return EGO_TOOL_DECLS.map(spec => ({ ...spec, handler: (args, ctx) => this.serial(async () => {
       if (!this.running) return { text: 'Ego World is stopped.', failed: true };
-      if (this.saved.halted) return { text: `Ego paused: ${this.saved.reason}\nThe operator must resume in the World panel.`, failed: true };
+      if (this.saved.halted) return { text: `Ego paused: ${this.saved.reason}\n${this.canRecoverMissingSpace() && (this.recoveryTimer || this.recoveringSpace) ? 'Automatic Space recovery is pending. Keep Ego and its helper available; do not repeat browser operations.' : 'The operator must resume in the World panel.'}`, failed: true };
       if (!this.connected) return { text: `Ego is not connected: ${this.saved.reason || 'Reconnect from the World panel.'}`, failed: true };
       ctx.signal?.throwIfAborted();
       try { return await this.invokeTool(spec.name.slice(4), args, ctx.signal); }
@@ -86,6 +90,7 @@ export class EgoWorld implements World {
             const result = await prepareHelperLauncher(this.helperDir, this.options.cfg.cliFile);
             this.launcherFile = result.launcherFile;
           } else if (method === 'stop-helper') {
+            this.clearSpaceRecovery();
             await this.helper.stop(); this.helperOnline = false;
             if (this.transport?.selected === 'helper') {
               this.cancelWatch(); this.connected = false;
@@ -109,7 +114,7 @@ export class EgoWorld implements World {
             await this.connect();
           } else if (method === 'recreate-space') {
             if (!this.saved.halted || !this.saved.spaceMissing || this.saved.code !== 'EGO_TASK_SPACE_NOT_FOUND' || !this.saved.spaceId) throw new Error(zh ? '只有确认旧浏览空间不存在时才能重新建立。' : 'Recreation requires a confirmed missing Space.');
-            // Operator-only action. Do not forget the old id until Ego returns a new one.
+            // Manual fallback. Do not forget the old id until Ego returns a new one.
             await this.connect(true);
           } else if (method === 'handoff') {
             if (!this.connected || this.saved.halted) throw new Error(zh ? '连接后才能接管浏览器' : 'Connect before taking control');
@@ -125,6 +130,7 @@ export class EgoWorld implements World {
     };
   }
   status() { return { running: this.running, connected: this.connected, ...this.saved, spaceName: this.spaceName, watching: this.watch?.page ?? null,
+    autoRecovering: this.running && this.canRecoverMissingSpace() && (!!this.recoveryTimer || this.recoveringSpace),
     sampling: this.watch ? this.samplingStatus(this.watch) : null,
     connectionMode: this.options.cfg.connectionMode || 'auto', transport: this.transport?.selected ?? 'direct',
     helperOnline: this.helperOnline, helperDir: this.helperDir, launcherFile: this.launcherFile, canPrepareHelper: process.platform === 'win32' }; }
@@ -138,14 +144,14 @@ export class EgoWorld implements World {
           spaceMissing: saved.spaceMissing === true && previous.code === 'EGO_TASK_SPACE_NOT_FOUND' };
       }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.saved = { halted: true, reason: `Cannot read Ego state: ${String(error)}` }; } }
-    if (this.saved.halted) { await this.event('state', `Ego paused: ${this.saved.reason}`, true); return; }
+    if (this.saved.halted && !this.canRecoverMissingSpace()) { await this.event('state', `Ego paused: ${this.saved.reason}`, true); return; }
     await this.serial(async () => {
-      try { await this.connect(); }
+      try { const missing = this.canRecoverMissingSpace(); await this.connect(missing, missing); }
       catch (error) { this.connected = false; await this.event('state', `Ego connection failed: ${String(error)}`, true); }
     });
   }
   async stop(): Promise<void> {
-    const watch = this.watch; this.running = false; this.cancelWatch(); this.lifetime.abort();
+    const watch = this.watch; this.running = false; this.cancelWatch(); this.clearSpaceRecovery(); this.lifetime.abort();
     await this.queue.catch(() => {});
     // Do not touch a Space after user takeover or an uncertain command outcome.
     if (watch && !this.saved.halted && this.connected) {
@@ -161,20 +167,54 @@ export class EgoWorld implements World {
     await mkdir(join(this.options.dataDir, 'ego'), { recursive: true });
     await writeFile(this.stateFile, JSON.stringify({ ...this.saved, spaceName: this.spaceName }), { mode: 0o600 });
   }
-  private async connect(byName = false): Promise<void> {
-    await this.command('connect', {}, undefined, byName, byName); this.connected = true; this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.saved.spaceMissing = false;
-    await this.save(); await this.event('state', `Ego connected. Space ${this.saved.spaceId} (${this.spaceName}).${byName ? ' The operator re-established the missing Space by its dedicated name. Old page labels and refs are invalid; use ego_tabs and reopen needed pages. Video watching has not resumed.' : ''}`, true);
+  private canRecoverMissingSpace(): boolean {
+    return this.saved.halted && this.saved.spaceMissing === true && this.saved.code === 'EGO_TASK_SPACE_NOT_FOUND'
+      && typeof this.saved.spaceId === 'number' && Number.isSafeInteger(this.saved.spaceId) && this.saved.spaceId > 0;
+  }
+  private clearSpaceRecovery(): void {
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = undefined; this.recoveryDelay = 5000;
+  }
+  private scheduleSpaceRecovery(): void {
+    if (!this.running || this.lifetime.signal.aborted || !this.canRecoverMissingSpace() || this.recoveryTimer) return;
+    const signal = this.lifetime.signal;
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = undefined;
+      void this.serial(async () => {
+        if (signal.aborted || !this.running || !this.canRecoverMissingSpace()) return;
+        try { await this.connect(true, true); }
+        catch { /* connect retains the failure and schedules the next bounded retry. */ }
+      });
+    }, this.recoveryDelay);
+    this.recoveryTimer.unref?.();
+    this.recoveryDelay = Math.min(this.recoveryDelay * 2, 60000);
+  }
+  private async connect(byName = false, automatic = false, signal?: AbortSignal): Promise<void> {
+    if (automatic) this.recoveringSpace = true;
+    try {
+      await this.command('connect', {}, signal, byName, byName);
+      this.lifetime.signal.throwIfAborted(); signal?.throwIfAborted();
+      this.connected = true; this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.saved.spaceMissing = false;
+      this.clearSpaceRecovery();
+      await this.save(); await this.event('state', `Ego connected. Space ${this.saved.spaceId} (${this.spaceName}).${byName ? ` ${automatic ? 'Automatically' : 'The operator'} re-established the missing Space by its dedicated name. ${SPACE_RESET_HINT}` : ''}`, true);
+    } catch (error) {
+      if (!byName && this.canRecoverMissingSpace() && this.running && !this.lifetime.signal.aborted && !signal?.aborted) {
+        await this.connect(true, true, signal); return;
+      }
+      if (automatic && !signal?.aborted) this.scheduleSpaceRecovery();
+      throw error;
+    } finally { if (automatic) this.recoveringSpace = false; }
   }
   private async command(operation: string, args: Record<string, unknown>, signal?: AbortSignal, operatorResume = false, byName = false): Promise<any> {
     if (this.saved.halted && !operatorResume) throw new Error(`Ego paused: ${this.saved.reason}`);
     signal?.throwIfAborted();
     const combined = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
     const receipt: BridgeReceipt = normalizeFailure(await this.bridge.run(operation, { ...args, restoreMinimized: this.options.cfg.restoreMinimized, spaceId: byName ? undefined : this.saved.spaceId, spaceName: this.spaceName }, combined));
-    if (receipt.spaceId) { this.saved.spaceId = receipt.spaceId; await this.save(); }
+    if (receipt.spaceId && !receipt.error) { this.saved.spaceId = receipt.spaceId; await this.save(); }
     if (receipt.error) {
       if (isConnectionFailure(receipt.code)) {
         if (operatorResume && this.saved.halted) {
-          this.saved.reason += `\n${receipt.error}`; this.connected = false; await this.save();
+          this.saved.reason = `${this.saved.reason.split('\n')[0]}\n${receipt.error}`; this.connected = false; await this.save();
           throw new Error(`${receipt.code}: ${receipt.error}`);
         }
         this.saved.halted = false; this.saved.reason = receipt.error; this.saved.code = receipt.code; this.cancelWatch(); this.connected = false;
@@ -182,7 +222,16 @@ export class EgoWorld implements World {
       } else if (receipt.uncertain || STOP_CODES.test(receipt.code ?? receipt.error)) {
         this.saved.halted = true; this.saved.reason = `${receipt.code ?? 'UNCERTAIN'}: ${receipt.error}`; this.saved.code = receipt.code ?? 'UNCERTAIN';
         this.saved.spaceMissing = receipt.code === 'EGO_TASK_SPACE_NOT_FOUND' && !receipt.uncertain; this.cancelWatch(); this.connected = false;
+        if (!this.saved.spaceMissing) this.clearSpaceRecovery();
         await this.save(); await this.event('state', `Ego stopped: ${this.saved.reason}`, true);
+        if (this.canRecoverMissingSpace() && this.running && !combined.aborted) {
+          this.scheduleSpaceRecovery();
+          if (!byName && !operatorResume && operation !== 'connect') {
+            try { await this.connect(true, true, signal); }
+            catch (error) { throw new Error(`${receipt.code}: ${receipt.error}\nAutomatic Space recovery failed: ${String(error)}`); }
+            throw new Error(`${receipt.code}: ${receipt.error}\nThe missing Space was automatically re-established. ${SPACE_RESET_HINT}`);
+          }
+        }
       }
       throw new Error(`${receipt.code ? `${receipt.code}: ` : ''}${receipt.error}`);
     }

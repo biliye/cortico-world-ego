@@ -59,6 +59,30 @@ it('returns stable control-stop codes to the World', async () => {
   const result = await execute({ operation: 'tabs', args: {} });
   expect(result.code).toBe('EGO_TASK_SPACE_USER_IN_CONTROL');
 });
+it('observes delegated control without selecting a page, claiming or taking over', async () => {
+  const select = vi.fn(async () => task), takeover = vi.fn(), claim = vi.fn();
+  vi.stubGlobal('taskSpace', select); vi.stubGlobal('takeOverTaskSpace', takeover); vi.stubGlobal('claimTaskSpace', claim);
+  vi.stubGlobal('listTaskSpaces', async () => [{ id: 1, ownership: 'agentDelegatedToUser' }]);
+  expect(await execute({ operation: 'control-status', args: { spaceId: 1 } })).toMatchObject({ spaceId: 1, value: { control: 'user' } });
+  expect(select).not.toHaveBeenCalled(); expect(takeover).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled();
+});
+it('confirms returned control using the official bounded control probe on the same id', async () => {
+  task.waitForControl = vi.fn(async () => {});
+  vi.stubGlobal('listTaskSpaces', async () => [{ id: 1, ownership: 'agent' }]);
+  const select = vi.fn(async () => task); vi.stubGlobal('taskSpace', select);
+  expect(await execute({ operation: 'control-status', args: { spaceId: 1 } })).toMatchObject({ spaceId: 1, value: { control: 'agent' } });
+  expect(select).toHaveBeenCalledWith(1); expect(task.waitForControl).toHaveBeenCalledWith({ interval: 1, timeout: 1 });
+  task.waitForControl.mockRejectedValueOnce(Object.assign(new Error('user took control again'), { error_code: 'EGO_TASK_SPACE_USER_IN_CONTROL' }));
+  expect(await execute({ operation: 'control-status', args: { spaceId: 1 } })).toMatchObject({ code: 'EGO_TASK_SPACE_USER_IN_CONTROL' });
+});
+it('never creates a replacement or claims an ended task during a control check', async () => {
+  const select = vi.fn(); vi.stubGlobal('taskSpace', select);
+  vi.stubGlobal('listTaskSpaces', async () => [{ id: 1, ownership: 'user' }]);
+  expect(await execute({ operation: 'control-status', args: { spaceId: 1 } })).toMatchObject({ value: { control: 'inactive' } });
+  expect(await execute({ operation: 'control-status', args: { spaceId: 2 } })).toMatchObject({ code: 'EGO_TASK_SPACE_NOT_FOUND', uncertain: false });
+  expect((await execute({ operation: 'control-status', args: {} })).error).toContain('existing Space id');
+  expect(select).not.toHaveBeenCalled();
+});
 it('returns a serializable null when page JavaScript returns undefined', async () => {
   page.evaluate = async () => undefined;
   const result = await execute({ operation: 'evaluate', args: { page: 'p1', expression: 'undefined' } });

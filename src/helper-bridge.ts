@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import type { BridgeReceipt, EgoBridge } from './bridge.ts';
 import { normalizeFailure } from './failures.ts';
 import { isElevated } from './permissions.ts';
-export const HELPER_PROTOCOL = 1;
+export const HELPER_PROTOCOL = 2;
 export interface HelperEndpoint { protocol: number; port: number; token: string; pid: number }
 export async function readEndpoint(dir: string): Promise<HelperEndpoint> {
   const endpoint = JSON.parse(await readFile(join(dir, 'endpoint.json'), 'utf8'));
@@ -42,7 +42,7 @@ export class HelperBridge implements EgoBridge {
       const receipt = await response.json() as BridgeReceipt;
       if (!response.ok || !receipt || typeof receipt !== 'object' || (!('value' in receipt) && !receipt.error)) throw new Error(`Ego helper HTTP ${response.status}: invalid receipt`);
       return normalizeFailure(receipt);
-    } catch (error) { return { error: `Ego helper connection interrupted: ${String(error)}`, uncertain: true }; }
+    } catch (error) { return { error: `Ego helper connection interrupted: ${String(error)}`, code: !signal?.aborted && (error as Error).name === 'TimeoutError' ? 'EGO_COMMAND_TIMEOUT' : undefined, uncertain: true }; }
   }
 }
 export class AutoBridge implements EgoBridge {

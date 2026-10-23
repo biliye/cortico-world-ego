@@ -42,7 +42,7 @@ export class CliBridge implements EgoBridge {
           if (error) fail(error); else done();
         };
         const abort = () => { child.kill(); finish(Object.assign(new Error('Ego 命令已取消；浏览器端可能仍有未完成操作。请在面板核对并恢复。'), { uncertain: true })); };
-        const timer = setTimeout(() => { child.kill(); finish(Object.assign(new Error(`Ego command timed out after ${this.options.timeoutMs()}ms; browser-side effects may still finish. Check the Space before resuming.`), { uncertain: true })); }, this.options.timeoutMs());
+        const timer = setTimeout(() => { child.kill(); finish(Object.assign(new Error(`Ego command timed out after ${this.options.timeoutMs()}ms; browser-side effects may still finish. Check the Space before resuming.`), { uncertain: true, code: 'EGO_COMMAND_TIMEOUT' })); }, this.options.timeoutMs());
         signal?.addEventListener('abort', abort, { once: true });
         if (signal?.aborted) abort();
         child.stderr?.on('data', (chunk) => { if (stderr.length < 8000) stderr += chunk.toString(); });
@@ -53,7 +53,7 @@ export class CliBridge implements EgoBridge {
       if (!receipt || typeof receipt !== 'object' || (!('value' in receipt) && !receipt.error)) throw new Error('Invalid Ego receipt');
       return receipt;
     } catch (error) {
-      return normalizeFailure({ error: error instanceof Error ? error.message : String(error), uncertain: (error as { uncertain?: boolean }).uncertain ?? launched });
+      return normalizeFailure({ error: error instanceof Error ? error.message : String(error), code: (error as { code?: string }).code === 'EGO_COMMAND_TIMEOUT' ? 'EGO_COMMAND_TIMEOUT' : undefined, uncertain: (error as { uncertain?: boolean }).uncertain ?? launched });
     } finally {
       await Promise.allSettled([unlink(input), unlink(output), unlink(screenshotFile)]);
     }

@@ -29,3 +29,8 @@ it('explains automatic recovery while preserving the manual fallback and control
   expect(view.detail).toContain('失败后会延迟重试');
   expect(panelView({ ...base, spaceId: 3, halted: true, spaceMissing: true, code: 'EGO_TASK_SPACE_NOT_FOUND', autoRecovering: true }, false).title).toBe('Automatically recovering browser Space');
 });
+it('explains automatic control synchronization and read-only timeout recovery', () => {
+  expect(panelView({ ...base, halted: true, code: 'EGO_TASK_SPACE_USER_IN_CONTROL', checkingControl: true }).detail).toContain('无需再点一次');
+  expect(panelView({ ...base, halted: true, code: 'EGO_COMMAND_TIMEOUT', checkingControl: true }).detail).toContain('只读命令超时');
+  expect(panelView({ ...base, halted: true, code: 'UNCERTAIN' }).detail).toContain('未完成操作');
+});

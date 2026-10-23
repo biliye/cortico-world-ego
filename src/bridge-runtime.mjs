@@ -12,6 +12,16 @@ function errorCode(error) {
 export async function execute({ operation, args }) {
   let task;
   try {
+    if (operation === 'control-status') {
+      // Observe the same existing Space. Never claim, take over, or create one.
+      if (!Number.isSafeInteger(args.spaceId) || args.spaceId <= 0) throw new Error('Control check requires an existing Space id.');
+      const space = (await listTaskSpaces()).find(space => space.id === args.spaceId);
+      if (!space) return { error: `task space not found: ${args.spaceId}`, code: 'EGO_TASK_SPACE_NOT_FOUND', uncertain: false };
+      if (space.ownership !== 'agent') return { spaceId: space.id, value: { control: space.ownership === 'agentDelegatedToUser' ? 'user' : 'inactive' } };
+      task = await taskSpace(space.id);
+      await task.waitForControl({ interval: 1, timeout: 1 });
+      return { spaceId: task.spaceId, value: { control: 'agent' } };
+    }
     if (operation === 'resume') {
       // Only an authenticated operator panel can dispatch this operation.
       try { task = await takeOverTaskSpace(args.spaceId); }

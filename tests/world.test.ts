@@ -167,6 +167,74 @@ describe('contract and tools', () => {
 });
 
 describe('control boundaries', () => {
+  async function controlTick(ms: number) { await vi.advanceTimersByTimeAsync(ms); await (world as any).queue; }
+  it('synchronizes Ego return without a second panel click and never replays work or restarts watching', async () => {
+    vi.useFakeTimers();
+    await call('video', { page: 'p1', action: 'watch' }); await call('handoff');
+    const count = browser.calls.length;
+    browser.next = { spaceId: 1, value: { control: 'user' } }; await controlTick(2000);
+    expect(world.status()).toMatchObject({ halted: true, checkingControl: true, watching: null });
+    browser.next = { spaceId: 1, value: { control: 'agent' } }; await controlTick(4000);
+    expect(world.status()).toMatchObject({ halted: false, connected: true, checkingControl: false, watching: null });
+    expect(browser.calls.slice(count)).toEqual([{ op: 'control-status', args: { spaceId: 1 } }, { op: 'control-status', args: { spaceId: 1 } }]);
+    expect(JSON.parse(await readFile(join(dir, 'ego', 'space.json'), 'utf8')).halted).toBe(false);
+    expect(events.at(-1)?.text).toContain('failed operation was not replayed');
+    await controlTick(60000); expect(browser.calls).toHaveLength(count + 2);
+  });
+  it.each(['read', 'tabs'])('automatically checks %s timeouts without replaying the failed observation', async (op: string) => {
+    vi.useFakeTimers(); browser.next = { error: 'timed out', code: 'EGO_COMMAND_TIMEOUT', uncertain: true };
+    expect((await call(op, { page: 'p1' })).failed).toBe(true);
+    expect(world.status()).toMatchObject({ halted: true, checkingControl: true });
+    const count = browser.calls.length;
+    browser.next = { spaceId: 1, value: { control: 'agent' } }; await controlTick(2000);
+    expect(world.status()).toMatchObject({ halted: false, connected: true });
+    expect(browser.calls.slice(count).map(c => c.op)).toEqual(['control-status']);
+  });
+  it.each(['click', 'fill', 'press', 'evaluate', 'video'])('keeps uncertain %s timeouts stopped across restart', async (op: string) => {
+    vi.useFakeTimers(); browser.next = { error: 'timed out', code: 'EGO_COMMAND_TIMEOUT', uncertain: true };
+    await call(op, { page: 'p1', selector: '@1', text: 'x', key: 'Enter', expression: 'submit()', action: 'inspect' });
+    const count = browser.calls.length; await controlTick(120000); await world.stop(); await world.start(host()); await controlTick(120000);
+    expect(world.status()).toMatchObject({ halted: true, checkingControl: false }); expect(browser.calls).toHaveLength(count);
+  });
+  it('resumes control checking after restart, but preserves the stop while the helper is unavailable', async () => {
+    vi.useFakeTimers(); await call('handoff'); await world.stop(); await world.start(host());
+    browser.next = { error: 'offline', code: 'EGO_HELPER_UNAVAILABLE' }; await controlTick(2000);
+    expect(world.status()).toMatchObject({ halted: true, code: 'EGO_TASK_SPACE_USER_IN_CONTROL' });
+    browser.next = { spaceId: 1, value: { control: 'agent' } }; await controlTick(4000);
+    expect(world.status()).toMatchObject({ halted: false, connected: true });
+  });
+  it.each(['EGO_TASK_SPACE_INACTIVE', 'EGO_TASK_SPACE_NOT_FOUND', 'EGO_TASK_HOST_DISCONNECTED'])('never reconnects or replaces a Space when control checking returns %s', async (code: string) => {
+    vi.useFakeTimers(); await call('handoff'); const count = browser.calls.length;
+    browser.next = { error: code, code }; await controlTick(2000); await controlTick(120000);
+    expect(world.status()).toMatchObject({ halted: true, code, checkingControl: false, autoRecovering: false });
+    expect(browser.calls.slice(count).map(c => c.op)).toEqual(['control-status']);
+  });
+  it('does not resume on ambiguous, mismatched or uncertain control observations', async () => {
+    vi.useFakeTimers(); await call('handoff');
+    for (const [delay, receipt] of [
+      [2000, { spaceId: 2, value: { control: 'agent' } }],
+      [4000, { spaceId: 1, value: {} }],
+      [8000, { spaceId: 1, uncertain: true, value: { control: 'agent' } }],
+    ] as const) { browser.next = receipt; await controlTick(delay); expect(world.status().halted).toBe(true); }
+    await world.stop(); const count = browser.calls.length; await controlTick(120000); expect(browser.calls).toHaveLength(count);
+  });
+  it('cancels control checks when the operator stops the helper', async () => {
+    vi.useFakeTimers(); await call('handoff'); vi.spyOn((world as any).helper, 'stop').mockResolvedValue(undefined);
+    await world.webUi().invoke!('control', 'stop-helper', []); const count = browser.calls.length;
+    await controlTick(120000); expect(browser.calls).toHaveLength(count);
+  });
+  it('keeps a user-control receipt with uncertain effects stopped without probing', async () => {
+    vi.useFakeTimers(); browser.next = { error: 'control changed after an uncertain action', code: 'EGO_TASK_SPACE_USER_IN_CONTROL', uncertain: true };
+    await call('tabs'); const count = browser.calls.length; await controlTick(120000);
+    expect(world.status().checkingControl).toBe(false); expect(browser.calls).toHaveLength(count);
+  });
+  it('does not infer a safe return from a legacy control stop that did not persist uncertainty', async () => {
+    vi.useFakeTimers(); await world.stop();
+    await writeFile(join(dir, 'ego', 'space.json'), JSON.stringify({ spaceName: world.status().spaceName, spaceId: 1, halted: true,
+      code: 'EGO_TASK_SPACE_USER_IN_CONTROL', reason: 'A previous operation might still finish.' }));
+    const count = browser.calls.length; await world.start(host()); await controlTick(120000);
+    expect(world.status()).toMatchObject({ halted: true, uncertain: true, checkingControl: false }); expect(browser.calls).toHaveLength(count);
+  });
   it('automatically reconnects a stale id by its dedicated name and clears the old helper reason', async () => {
     (world as any).saved = { spaceId: 3, halted: false, reason: 'The operator stopped the ordinary-permission helper.', code: 'EGO_HELPER_UNAVAILABLE' };
     browser.next = { error: 'task space not found: 3', uncertain: false };

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { startHelper } from '../src/helper.ts';
 import { AutoBridge, HelperBridge, readEndpoint } from '../src/helper-bridge.ts';
@@ -55,6 +55,10 @@ it('chooses the helper before launching any client when the host is elevated', a
 it('keeps helper-unavailable failures retryable without dispatching a browser operation', async () => {
   const result = await new HelperBridge(dir, () => 1000).run('connect', {});
   expect(result).toMatchObject({ code: 'EGO_HELPER_UNAVAILABLE', uncertain: false });
+});
+it('requires the updated helper protocol instead of silently failing automatic control checks', async () => {
+  await writeFile(join(dir, 'endpoint.json'), JSON.stringify({ protocol: 1, port: 1, token: '0'.repeat(64), pid: 1 }));
+  expect(await new HelperBridge(dir, () => 1000).run('control-status', { spaceId: 1 })).toMatchObject({ code: 'EGO_HELPER_VERSION', uncertain: false });
 });
 it('supports an authenticated shutdown and removes its own endpoint', async () => {
   const service = await startHelper({ dir, checkElevated: async () => false, bridge: { run: async () => ({ value: null }) } }); close = service.close;

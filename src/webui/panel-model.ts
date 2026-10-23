@@ -1,6 +1,6 @@
 export interface EgoPanelStatus {
   running: boolean; connected: boolean; halted: boolean; reason: string; code?: string;
-  spaceId?: number; spaceName: string; watching: string | null; spaceMissing?: boolean; autoRecovering?: boolean;
+  spaceId?: number; spaceName: string; watching: string | null; spaceMissing?: boolean; autoRecovering?: boolean; checkingControl?: boolean;
   sampling?: { batch: number; current: { windowSec: number; frameIntervalSec: number; plannedFrames: number }; pending: { windowSec: number; frameIntervalSec: number; plannedFrames: number } | null } | null;
   connectionMode: 'auto' | 'direct' | 'helper'; transport: 'direct' | 'helper';
   helperOnline: boolean; helperDir: string; launcherFile: string; canPrepareHelper: boolean;
@@ -24,7 +24,8 @@ export function panelView(status: EgoPanelStatus, zh = true) {
   } else if (status.halted) {
     const user = status.code === 'EGO_TASK_SPACE_USER_IN_CONTROL';
     title = user ? say('浏览器由你操作', 'You control the browser') : say('操作已暂停，等待确认', 'Automation paused for review');
-    detail = user ? say('操作完成后，点击「交还 bot」。之后需要重新发起视频观看。', 'When finished, return control to the bot. Restart video watching separately.')
+    detail = user && status.checkingControl ? say('在 Ego 中交还后会自动同步，无需再点一次。也可在这里点击「交还 bot」。视频需要重新发起观看。', 'Returning control in Ego is synchronized automatically. You can also return it here. Restart video watching separately.')
+      : status.checkingControl ? say('只读命令超时，正在自动检查原 Space，确认可用后恢复。失败命令不会重放，视频不会自动续看。', 'A read-only command timed out. Checking the same Space automatically before resuming. The failed operation and video watching are not restarted.')
       : say('请先在 Ego 核对页面及未完成操作，确认后再恢复。', 'Check the page and any unfinished operation in Ego before resuming.');
   } else if (status.connected) {
     title = status.watching ? say('正在观看视频', 'Watching a video') : say('浏览器已连接', 'Browser connected');

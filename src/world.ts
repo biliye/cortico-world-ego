@@ -22,7 +22,7 @@ interface Watch {
 }
 const MAX_PENDING_SCENES = 4;
 const SPACE_RESET_HINT = 'Old page labels and refs are invalid; use ego_tabs and reopen needed pages. Video watching has not resumed. The failed operation was not replayed.';
-interface SavedState { spaceId?: number; halted: boolean; reason: string; code?: string; spaceMissing?: boolean }
+interface SavedState { spaceId?: number; halted: boolean; reason: string; code?: string; spaceMissing?: boolean; uncertain?: boolean; observationTimeout?: boolean }
 export interface EgoWorldOptions {
   cfg: EgoConfigSection; timezone: string; dataDir: string; botDir: string; bridge?: EgoBridge;
 }
@@ -46,6 +46,8 @@ export class EgoWorld implements World {
   private recoveryTimer?: ReturnType<typeof setTimeout>;
   private recoveryDelay = 5000;
   private recoveringSpace = false;
+  private controlTimer?: ReturnType<typeof setTimeout>;
+  private controlDelay = 2000;
   private watch?: Watch;
   private generation = 0;
   private pendingScenes = new Set<{ page: string; outcome?: ToolOutcome }>();
@@ -65,7 +67,7 @@ export class EgoWorld implements World {
   tools(): ToolDef[] {
     return EGO_TOOL_DECLS.map(spec => ({ ...spec, handler: (args, ctx) => this.serial(async () => {
       if (!this.running) return { text: 'Ego World is stopped.', failed: true };
-      if (this.saved.halted) return { text: `Ego paused: ${this.saved.reason}\n${this.canRecoverMissingSpace() && (this.recoveryTimer || this.recoveringSpace) ? 'Automatic Space recovery is pending. Keep Ego and its helper available; do not repeat browser operations.' : 'The operator must resume in the World panel.'}`, failed: true };
+      if (this.saved.halted) return { text: `Ego paused: ${this.saved.reason}\n${this.canRecoverMissingSpace() && (this.recoveryTimer || this.recoveringSpace) ? 'Automatic Space recovery is pending. Keep Ego and its helper available; do not repeat browser operations.' : this.canCheckControl() ? 'Control is checked automatically. Return control in Ego when finished; the World panel is an alternative. Do not repeat browser operations.' : 'The operator must resume in the World panel.'}`, failed: true };
       if (!this.connected) return { text: `Ego is not connected: ${this.saved.reason || 'Reconnect from the World panel.'}`, failed: true };
       ctx.signal?.throwIfAborted();
       try { return await this.invokeTool(spec.name.slice(4), args, ctx.signal); }
@@ -91,6 +93,7 @@ export class EgoWorld implements World {
             this.launcherFile = result.launcherFile;
           } else if (method === 'stop-helper') {
             this.clearSpaceRecovery();
+            this.clearControlCheck();
             await this.helper.stop(); this.helperOnline = false;
             if (this.transport?.selected === 'helper') {
               this.cancelWatch(); this.connected = false;
@@ -107,7 +110,8 @@ export class EgoWorld implements World {
             if (!this.saved.halted) throw new Error(zh ? '当前无需交还控制；连接失败请点重试连接。' : 'No control handoff to resume; retry the connection instead.');
             // No model tool reaches the takeover operation.
             await this.command(this.saved.spaceId ? 'resume' : 'connect', {}, undefined, true);
-            this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.saved.spaceMissing = false; this.connected = true;
+            this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.saved.spaceMissing = false; this.saved.uncertain = false; this.saved.observationTimeout = false; this.connected = true;
+            this.clearControlCheck();
             await this.save(); await this.event('state', 'The operator resumed this Ego Space.', true);
           } else if (method === 'connect') {
             if (this.saved.halted) throw new Error(this.saved.reason);
@@ -131,6 +135,7 @@ export class EgoWorld implements World {
   }
   status() { return { running: this.running, connected: this.connected, ...this.saved, spaceName: this.spaceName, watching: this.watch?.page ?? null,
     autoRecovering: this.running && this.canRecoverMissingSpace() && (!!this.recoveryTimer || this.recoveringSpace),
+    checkingControl: this.running && this.canCheckControl() && !!this.controlTimer,
     sampling: this.watch ? this.samplingStatus(this.watch) : null,
     connectionMode: this.options.cfg.connectionMode || 'auto', transport: this.transport?.selected ?? 'direct',
     helperOnline: this.helperOnline, helperDir: this.helperDir, launcherFile: this.launcherFile, canPrepareHelper: process.platform === 'win32' }; }
@@ -141,17 +146,19 @@ export class EgoWorld implements World {
       if (saved.spaceName === this.spaceName) {
         const previous = normalizeFailure({ error: String(saved.reason ?? ''), code: saved.code, uncertain: !!saved.halted });
         this.saved = { spaceId: saved.spaceId, halted: isConnectionFailure(previous.code) ? false : !!saved.halted, reason: String(saved.reason ?? ''), code: previous.code,
-          spaceMissing: saved.spaceMissing === true && previous.code === 'EGO_TASK_SPACE_NOT_FOUND' };
+          spaceMissing: saved.spaceMissing === true && previous.code === 'EGO_TASK_SPACE_NOT_FOUND',
+          uncertain: saved.uncertain === true || (saved.uncertain !== false && previous.code === 'EGO_TASK_SPACE_USER_IN_CONTROL' && saved.reason !== 'Control was handed to the operator.'),
+          observationTimeout: saved.observationTimeout === true && previous.code === 'EGO_COMMAND_TIMEOUT' };
       }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.saved = { halted: true, reason: `Cannot read Ego state: ${String(error)}` }; } }
-    if (this.saved.halted && !this.canRecoverMissingSpace()) { await this.event('state', `Ego paused: ${this.saved.reason}`, true); return; }
+    if (this.saved.halted && !this.canRecoverMissingSpace()) { this.scheduleControlCheck(); await this.event('state', `Ego paused: ${this.saved.reason}`, true); return; }
     await this.serial(async () => {
       try { const missing = this.canRecoverMissingSpace(); await this.connect(missing, missing); }
       catch (error) { this.connected = false; await this.event('state', `Ego connection failed: ${String(error)}`, true); }
     });
   }
   async stop(): Promise<void> {
-    const watch = this.watch; this.running = false; this.cancelWatch(); this.clearSpaceRecovery(); this.lifetime.abort();
+    const watch = this.watch; this.running = false; this.cancelWatch(); this.clearSpaceRecovery(); this.clearControlCheck(); this.lifetime.abort();
     await this.queue.catch(() => {});
     // Do not touch a Space after user takeover or an uncertain command outcome.
     if (watch && !this.saved.halted && this.connected) {
@@ -166,6 +173,44 @@ export class EgoWorld implements World {
   private async save(): Promise<void> {
     await mkdir(join(this.options.dataDir, 'ego'), { recursive: true });
     await writeFile(this.stateFile, JSON.stringify({ ...this.saved, spaceName: this.spaceName }), { mode: 0o600 });
+  }
+  private canCheckControl(): boolean {
+    return this.saved.halted && Number.isSafeInteger(this.saved.spaceId) && this.saved.spaceId! > 0
+      && ((this.saved.code === 'EGO_TASK_SPACE_USER_IN_CONTROL' && !this.saved.uncertain)
+        || (this.saved.code === 'EGO_COMMAND_TIMEOUT' && this.saved.observationTimeout === true));
+  }
+  private clearControlCheck(): void {
+    if (this.controlTimer) clearTimeout(this.controlTimer);
+    this.controlTimer = undefined; this.controlDelay = 2000;
+  }
+  private scheduleControlCheck(): void {
+    if (!this.running || this.lifetime.signal.aborted || !this.canCheckControl() || this.controlTimer) return;
+    const signal = this.lifetime.signal;
+    this.controlTimer = setTimeout(() => {
+      this.controlTimer = undefined;
+      void this.serial(async () => {
+        if (!this.running || signal.aborted || !this.canCheckControl()) return;
+        try {
+          const id = this.saved.spaceId;
+          const receipt = normalizeFailure(await this.bridge.run('control-status', { spaceId: id }, signal));
+          if (!this.running || signal.aborted) return;
+          if (!receipt.error && !receipt.uncertain && receipt.spaceId === id && receipt.value?.control === 'agent') {
+            this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.saved.uncertain = false; this.saved.observationTimeout = false;
+            this.connected = true; this.clearControlCheck();
+            await this.save(); await this.event('state', 'Ego confirmed agent control of the same Space. Browser operations are available again. The failed operation was not replayed; video watching has not resumed. Refresh the page snapshot before using refs.', true);
+            return;
+          }
+          if (receipt.value?.control === 'inactive' || /EGO_TASK_SPACE_(INACTIVE|NOT_FOUND|NOT_SELECTED|NAME_IN_USE|UNAVAILABLE)|EGO_TASK_HOST_DISCONNECTED/.test(receipt.code ?? '')) {
+            // A control check must never trigger the separate missing-Space recreation path.
+            this.saved.code = receipt.code ?? 'EGO_TASK_SPACE_INACTIVE'; this.saved.reason = receipt.error ?? 'This Space is no longer assigned to the agent.';
+            this.saved.observationTimeout = false; this.saved.spaceMissing = false; this.clearControlCheck(); await this.save();
+            await this.event('state', `Ego remains paused: ${this.saved.code}: ${this.saved.reason}`, true); return;
+          }
+        } catch { /* Preserve the original stop. A failed observation cannot authorize resuming. */ }
+        this.scheduleControlCheck();
+      });
+    }, this.controlDelay);
+    this.controlTimer.unref?.(); this.controlDelay = Math.min(this.controlDelay * 2, 10000);
   }
   private canRecoverMissingSpace(): boolean {
     return this.saved.halted && this.saved.spaceMissing === true && this.saved.code === 'EGO_TASK_SPACE_NOT_FOUND'
@@ -194,7 +239,8 @@ export class EgoWorld implements World {
     try {
       await this.command('connect', {}, signal, byName, byName);
       this.lifetime.signal.throwIfAborted(); signal?.throwIfAborted();
-      this.connected = true; this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.saved.spaceMissing = false;
+      this.connected = true; this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.saved.spaceMissing = false; this.saved.uncertain = false; this.saved.observationTimeout = false;
+      this.clearControlCheck();
       this.clearSpaceRecovery();
       await this.save(); await this.event('state', `Ego connected. Space ${this.saved.spaceId} (${this.spaceName}).${byName ? ` ${automatic ? 'Automatically' : 'The operator'} re-established the missing Space by its dedicated name. ${SPACE_RESET_HINT}` : ''}`, true);
     } catch (error) {
@@ -221,6 +267,9 @@ export class EgoWorld implements World {
         await this.save(); await this.event('state', `Ego connection unavailable: ${receipt.code}: ${receipt.error}`, true);
       } else if (receipt.uncertain || STOP_CODES.test(receipt.code ?? receipt.error)) {
         this.saved.halted = true; this.saved.reason = `${receipt.code ?? 'UNCERTAIN'}: ${receipt.error}`; this.saved.code = receipt.code ?? 'UNCERTAIN';
+        this.saved.uncertain = receipt.uncertain === true;
+        this.saved.observationTimeout = receipt.code === 'EGO_COMMAND_TIMEOUT' && ['tabs', 'read'].includes(operation) && !combined.aborted;
+        this.clearControlCheck(); this.scheduleControlCheck();
         this.saved.spaceMissing = receipt.code === 'EGO_TASK_SPACE_NOT_FOUND' && !receipt.uncertain; this.cancelWatch(); this.connected = false;
         if (!this.saved.spaceMissing) this.clearSpaceRecovery();
         await this.save(); await this.event('state', `Ego stopped: ${this.saved.reason}`, true);
@@ -241,6 +290,7 @@ export class EgoWorld implements World {
   private async handoff(): Promise<ToolOutcome> {
     this.cancelWatch(); await this.command('handoff', {});
     this.saved.halted = true; this.saved.reason = 'Control was handed to the operator.'; this.saved.code = 'EGO_TASK_SPACE_USER_IN_CONTROL'; this.connected = false;
+    this.saved.uncertain = false; this.saved.observationTimeout = false; this.clearControlCheck(); this.scheduleControlCheck();
     await this.save(); await this.event('state', this.saved.reason, true);
     return { text: this.saved.reason };
   }

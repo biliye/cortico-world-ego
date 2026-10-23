@@ -88,6 +88,19 @@ it('returns a serializable null when page JavaScript returns undefined', async (
   const result = await execute({ operation: 'evaluate', args: { page: 'p1', expression: 'undefined' } });
   expect(JSON.parse(JSON.stringify(result)).value).toBe(null);
 });
+it('preserves responsive pending-Promise timeout metadata without claiming the script stopped', async () => {
+  page.evaluate = async () => { throw Object.assign(new Error('page.evaluate timed out after 15000ms; evaluation still pending'), {
+    code: 'EGO_PAGE_EVALUATION_TIMED_OUT', timeoutMs: 15000, executionStopped: false, pageResponsive: true, mayHaveLateEffects: true,
+  }); };
+  const result = await execute({ operation: 'evaluate', args: { page: 'p1', expression: 'new Promise(r => setTimeout(r, 20000))' } });
+  expect(JSON.parse(JSON.stringify(result))).toMatchObject({ code: 'EGO_PAGE_EVALUATION_TIMED_OUT', uncertain: true,
+    evaluation: { page: 'p1', timeoutMs: 15000, executionStopped: false, pageResponsive: true, mayHaveLateEffects: true } });
+});
+it('keeps unknown evaluation-timeout metadata unknown and conservatively uncertain', async () => {
+  page.evaluate = async () => { throw Object.assign(new Error('page evaluation timed out'), { code: 'EGO_PAGE_EVALUATION_TIMED_OUT' }); };
+  const result = await execute({ operation: 'evaluate', args: { page: 'p1', expression: 'pending()' } });
+  expect(result.uncertain).toBe(true); expect(JSON.parse(JSON.stringify(result)).evaluation).toEqual({ page: 'p1' });
+});
 it('still returns danmaku when the subtitle API fails and obeys the danmaku switch', async () => {
   page.url = async () => 'https://www.bilibili.com/video/BVfixture';
   const evaluate = vi.fn(async (fn: unknown) => {

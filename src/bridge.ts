@@ -5,12 +5,16 @@ import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { normalizeFailure } from './failures.ts';
+export interface EvaluationTimeout {
+  page?: string; timeoutMs?: number; executionStopped?: boolean; pageResponsive?: boolean; mayHaveLateEffects?: boolean;
+}
 export interface BridgeReceipt {
   spaceId?: number;
   value?: any;
   error?: string;
   code?: string;
   uncertain?: boolean;
+  evaluation?: EvaluationTimeout;
 }
 export interface EgoBridge {
   run(operation: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<BridgeReceipt>;

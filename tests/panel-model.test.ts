@@ -34,3 +34,11 @@ it('explains automatic control synchronization and read-only timeout recovery', 
   expect(panelView({ ...base, halted: true, code: 'EGO_COMMAND_TIMEOUT', checkingControl: true }).detail).toContain('只读命令超时');
   expect(panelView({ ...base, halted: true, code: 'UNCERTAIN' }).detail).toContain('未完成操作');
 });
+it('distinguishes a responsive pending evaluation from a frozen page without promising an automatic resume', () => {
+  const status = { ...base, halted: true, code: 'EGO_PAGE_EVALUATION_TIMED_OUT' };
+  const view = panelView({ ...status, evaluation: { page: 'p1', executionStopped: false, pageResponsive: true, mayHaveLateEffects: true } });
+  expect(view).toMatchObject({ title: '页面脚本求值超时', canResume: true, canConnect: false });
+  expect(view.detail).toContain('仍有响应'); expect(view.detail).toContain('ego_wait'); expect(view.detail).toContain('列标签');
+  expect(panelView({ ...status, evaluation: { pageResponsive: false } }).detail).toContain('页面未响应');
+  expect(panelView(status).detail).toContain('尚无页面响应状态');
+});

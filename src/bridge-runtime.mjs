@@ -77,7 +77,15 @@ export async function execute({ operation, args }) {
     }
     return { spaceId: task.spaceId, value: value ?? null };
   } catch (error) {
-    return { spaceId: task?.spaceId, error: error.message ?? String(error), code: errorCode(error), uncertain: !!error.mayHaveLateEffects };
+    const code = errorCode(error);
+    const evaluation = code === 'EGO_PAGE_EVALUATION_TIMED_OUT' ? {
+      page: args.page,
+      timeoutMs: Number.isFinite(error.timeoutMs) ? error.timeoutMs : undefined,
+      executionStopped: typeof error.executionStopped === 'boolean' ? error.executionStopped : undefined,
+      pageResponsive: typeof error.pageResponsive === 'boolean' ? error.pageResponsive : undefined,
+      mayHaveLateEffects: typeof error.mayHaveLateEffects === 'boolean' ? error.mayHaveLateEffects : undefined,
+    } : undefined;
+    return { spaceId: task?.spaceId, error: error.message ?? String(error), code, uncertain: !!evaluation || !!error.mayHaveLateEffects, ...(evaluation ? { evaluation } : {}) };
   }
 }
 async function inventory(task) {

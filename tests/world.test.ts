@@ -167,6 +167,37 @@ describe('contract and tools', () => {
 });
 
 describe('control boundaries', () => {
+  const evaluationTimeout = () => ({ code: 'EGO_PAGE_EVALUATION_TIMED_OUT', error: 'page.evaluate timed out after 15000ms; evaluation still pending', uncertain: true,
+    evaluation: { page: 'p1', timeoutMs: 15000, executionStopped: false, pageResponsive: true, mayHaveLateEffects: true } });
+  it('allows tab diagnosis after the reported 20-second Promise timeout while keeping actions paused', async () => {
+    vi.useFakeTimers(); browser.next = evaluationTimeout();
+    const result = await call('evaluate', { page: 'p1', expression: 'new Promise(r => setTimeout(r, 20000))' });
+    expect(result.failed).toBe(true); expect(result.text).toContain('EGO_PAGE_EVALUATION_TIMED_OUT');
+    const beforeTabs = browser.calls.length, tabs = await call('tabs');
+    expect(tabs.failed).toBeUndefined(); expect(tabs.text).toContain('Read-only diagnosis only'); expect(browser.calls).toHaveLength(beforeTabs + 1);
+    expect(world.status()).toMatchObject({ halted: true, uncertain: true, checkingControl: false, evaluation: { executionStopped: false, pageResponsive: true } });
+    expect((await call('click', { page: 'p1', selector: '@1' })).failed).toBe(true);
+    expect((await call('evaluate', { page: 'p1', expression: 'submit()' })).failed).toBe(true);
+    const count = browser.calls.length; await vi.advanceTimersByTimeAsync(60000); await (world as any).queue; expect(browser.calls).toHaveLength(count);
+    await world.stop(); await world.start(host());
+    expect(world.status()).toMatchObject({ halted: true, evaluation: { timeoutMs: 15000, pageResponsive: true } });
+    expect((await call('tabs')).failed).toBeUndefined();
+    await world.webUi().invoke!('control', 'resume', []); expect(world.status()).toMatchObject({ halted: false, evaluation: undefined });
+  });
+  it.each(['EGO_HELPER_UNAVAILABLE', 'EGO_TASK_SPACE_USER_IN_CONTROL', 'EGO_TASK_SPACE_NOT_FOUND', 'EGO_COMMAND_TIMEOUT'])('keeps the original evaluation stop if a diagnostic returns %s', async (code: string) => {
+    browser.next = evaluationTimeout(); await call('evaluate', { page: 'p1', expression: 'pending()' });
+    browser.next = { error: code, code, uncertain: code === 'EGO_COMMAND_TIMEOUT' };
+    expect((await call('tabs')).failed).toBe(true);
+    expect(world.status()).toMatchObject({ halted: true, code: 'EGO_PAGE_EVALUATION_TIMED_OUT', uncertain: true, checkingControl: false });
+    expect((await call('click', { page: 'p1', selector: '@1' })).failed).toBe(true);
+  });
+  it('keeps tab diagnostics blocked during ordinary takeover or an unknown uncertain command', async () => {
+    await call('handoff'); let count = browser.calls.length;
+    expect((await call('tabs')).failed).toBe(true); expect(browser.calls).toHaveLength(count);
+    await world.webUi().invoke!('control', 'resume', []); browser.next = { error: 'unknown late effects', uncertain: true };
+    await call('evaluate', { page: 'p1', expression: 'pending()' }); count = browser.calls.length;
+    expect((await call('tabs')).failed).toBe(true); expect(browser.calls).toHaveLength(count);
+  });
   async function controlTick(ms: number) { await vi.advanceTimersByTimeAsync(ms); await (world as any).queue; }
   it('synchronizes Ego return without a second panel click and never replays work or restarts watching', async () => {
     vi.useFakeTimers();
@@ -418,6 +449,41 @@ describe('control boundaries', () => {
     const result = await call('open', { url: 'unreachable.example' });
     expect(result.text).toContain('page=p2'); expect(result.failed).toBe(true);
     expect((await call('tabs')).failed).toBeUndefined();
+  });
+});
+
+describe('host-only waiting', () => {
+  it('waits twenty seconds without executing browser code or changing control', async () => {
+    vi.useFakeTimers(); const count = browser.calls.length;
+    const waiting = call('wait', { seconds: 20 }); let finished = false; void waiting.then(() => { finished = true; });
+    await vi.advanceTimersByTimeAsync(15000); expect(finished).toBe(false);
+    await vi.advanceTimersByTimeAsync(5000); const result = await waiting;
+    expect(result.failed).toBeUndefined(); expect(result.text).toContain('"waitedSeconds":20');
+    expect(browser.calls).toHaveLength(count); expect(world.status().halted).toBe(false);
+  });
+  it('does not block the browser queue or video sampling while waiting', async () => {
+    vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' }); const waiting = call('wait', { seconds: 20 });
+    expect((await call('tabs')).failed).toBeUndefined();
+    for (let i = 0; i < 20; i++) { await vi.advanceTimersByTimeAsync(1000); await (world as any).queue; }
+    expect((await waiting).failed).toBeUndefined(); expect(deferred.length).toBeGreaterThan(0); expect(world.status().watching).toBe('p1');
+  });
+  it('cancels a host wait immediately when the World stops', async () => {
+    vi.useFakeTimers(); const waiting = call('wait', { seconds: 60 }); await world.stop();
+    expect((await waiting).failed).toBe(true); expect(vi.getTimerCount()).toBe(0);
+  });
+  it('honors caller cancellation without marking a browser operation uncertain', async () => {
+    vi.useFakeTimers(); const controller = new AbortController(); const count = browser.calls.length;
+    const waiting = world.tools().find(t => t.name === 'ego_wait')!.handler({ seconds: 20 }, { role: 'test', log: nullLogger(), signal: controller.signal });
+    controller.abort(); expect(await waiting).toMatchObject({ failed: true }); expect(world.status().halted).toBe(false); expect(browser.calls).toHaveLength(count);
+  });
+  it('never clears an evaluation pause just because a host wait elapsed', async () => {
+    vi.useFakeTimers(); browser.next = { code: 'EGO_PAGE_EVALUATION_TIMED_OUT', error: 'still pending', uncertain: true };
+    await call('evaluate', { page: 'p1', expression: 'pending()' }); const count = browser.calls.length;
+    const waiting = call('wait', { seconds: 20 }); await vi.advanceTimersByTimeAsync(20000); expect((await waiting).failed).toBeUndefined();
+    expect(world.status().halted).toBe(true); expect(browser.calls).toHaveLength(count);
+  });
+  it.each([-1, 61, NaN, Infinity, '20', undefined])('rejects invalid host delay %s without invoking the browser', async (seconds: unknown) => {
+    const count = browser.calls.length; expect((await call('wait', { seconds })).failed).toBe(true); expect(browser.calls).toHaveLength(count);
   });
 });
 

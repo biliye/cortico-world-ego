@@ -1,6 +1,8 @@
+import type { EvaluationTimeout } from '../bridge.ts';
 export interface EgoPanelStatus {
   running: boolean; connected: boolean; halted: boolean; reason: string; code?: string;
   spaceId?: number; spaceName: string; watching: string | null; spaceMissing?: boolean; autoRecovering?: boolean; checkingControl?: boolean;
+  evaluation?: EvaluationTimeout;
   sampling?: { batch: number; current: { windowSec: number; frameIntervalSec: number; plannedFrames: number }; pending: { windowSec: number; frameIntervalSec: number; plannedFrames: number } | null } | null;
   connectionMode: 'auto' | 'direct' | 'helper'; transport: 'direct' | 'helper';
   helperOnline: boolean; helperDir: string; launcherFile: string; canPrepareHelper: boolean;
@@ -21,6 +23,13 @@ export function panelView(status: EgoPanelStatus, zh = true) {
   } else if (nameInUse) {
     title = say('浏览空间名称已被占用', 'Space name is already in use');
     detail = say('请在配置中改用本 bot 独有的浏览空间名称，再重启 World。不会接管占用该名称的空间。', 'Choose a unique Space name in settings, then restart this World. The existing Space will not be claimed.');
+  } else if (status.halted && status.code === 'EGO_PAGE_EVALUATION_TIMED_OUT') {
+    title = say('页面脚本求值超时', 'Page evaluation timed out');
+    const response = status.evaluation?.pageResponsive;
+    detail = (response === true ? say('Ego 报告页面仍有响应。', 'Ego reports that the page is responsive. ')
+      : response === false ? say('Ego 报告页面未响应。', 'Ego reports that the page is unresponsive. ')
+      : say('尚无页面响应状态。', 'The page response state is unknown. '))
+      + say('脚本可能仍有延迟效果，操作暂停等待核对；bot 仍可列标签作诊断。纯等待请用 ego_wait，不要在页面执行长时间 Promise。', 'Scheduled script effects may still finish. Actions remain paused for review; the bot can list tabs for diagnosis. Use ego_wait for simple delays instead of a long page Promise.');
   } else if (status.halted) {
     const user = status.code === 'EGO_TASK_SPACE_USER_IN_CONTROL';
     title = user ? say('浏览器由你操作', 'You control the browser') : say('操作已暂停，等待确认', 'Automation paused for review');

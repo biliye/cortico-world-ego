@@ -101,6 +101,17 @@ it('keeps unknown evaluation-timeout metadata unknown and conservatively uncerta
   const result = await execute({ operation: 'evaluate', args: { page: 'p1', expression: 'pending()' } });
   expect(result.uncertain).toBe(true); expect(JSON.parse(JSON.stringify(result)).evaluation).toEqual({ page: 'p1' });
 });
+it('can read the same managed page after evaluation times out without replaying or taking over', async () => {
+  page.evaluate = vi.fn(async () => { throw Object.assign(new Error('still pending'), { code: 'EGO_PAGE_EVALUATION_TIMED_OUT' }); });
+  page.snapshot = vi.fn(async () => 'current page snapshot');
+  const select = vi.fn(async () => task), takeover = vi.fn(), claim = vi.fn();
+  vi.stubGlobal('taskSpace', select); vi.stubGlobal('takeOverTaskSpace', takeover); vi.stubGlobal('claimTaskSpace', claim);
+  expect(await execute({ operation: 'evaluate', args: { spaceId: 1, page: 'p1', expression: 'pending()' } })).toMatchObject({ code: 'EGO_PAGE_EVALUATION_TIMED_OUT' });
+  expect(await execute({ operation: 'read', args: { spaceId: 1, page: 'p1', fullPage: true } })).toMatchObject({ spaceId: 1, value: 'current page snapshot' });
+  expect(select.mock.calls).toEqual([[1], [1]]); expect(page.evaluate).toHaveBeenCalledTimes(1);
+  expect(page.snapshot).toHaveBeenCalledWith({ scope: 'full_page' });
+  expect(takeover).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled();
+});
 it('still returns danmaku when the subtitle API fails and obeys the danmaku switch', async () => {
   page.url = async () => 'https://www.bilibili.com/video/BVfixture';
   const evaluate = vi.fn(async (fn: unknown) => {

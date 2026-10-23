@@ -2,7 +2,7 @@ import type { EvaluationTimeout } from '../bridge.ts';
 export interface EgoPanelStatus {
   running: boolean; connected: boolean; halted: boolean; reason: string; code?: string;
   spaceId?: number; spaceName: string; watching: string | null; spaceMissing?: boolean; autoRecovering?: boolean; checkingControl?: boolean;
-  evaluation?: EvaluationTimeout;
+  evaluation?: EvaluationTimeout; evaluationRecoveryBlocked?: string; lastUnknownEvaluation?: EvaluationTimeout;
   sampling?: { batch: number; current: { windowSec: number; frameIntervalSec: number; plannedFrames: number }; pending: { windowSec: number; frameIntervalSec: number; plannedFrames: number } | null } | null;
   connectionMode: 'auto' | 'direct' | 'helper'; transport: 'direct' | 'helper';
   helperOnline: boolean; helperDir: string; launcherFile: string; canPrepareHelper: boolean;
@@ -29,7 +29,11 @@ export function panelView(status: EgoPanelStatus, zh = true) {
     detail = (response === true ? say('Ego 报告页面仍有响应。', 'Ego reports that the page is responsive. ')
       : response === false ? say('Ego 报告页面未响应。', 'Ego reports that the page is unresponsive. ')
       : say('尚无页面响应状态。', 'The page response state is unknown. '))
-      + say('脚本可能仍有延迟效果，操作暂停等待核对；bot 仍可列标签作诊断。纯等待请用 ego_wait，不要在页面执行长时间 Promise。', 'Scheduled script effects may still finish. Actions remain paused for review; the bot can list tabs for diagnosis. Use ego_wait for simple delays instead of a long page Promise.');
+      + (status.checkingControl
+        ? say('正在后台检查原 Space 的控制权和超时页面快照，通过后自动恢复工具，无需点恢复。', 'Checking control of the original Space and a snapshot of the timed-out page; successful diagnosis restores tools automatically without a panel resume. ')
+        : say('自动诊断未运行；请核对空间、页面信息或助手状态后恢复。', 'Automatic diagnosis is not running; check the Space, page information or helper status before resuming. '))
+      + (status.evaluationRecoveryBlocked ? say(`诊断停止：${status.evaluationRecoveryBlocked}。`, `Diagnosis stopped: ${status.evaluationRecoveryBlocked}. `) : '')
+      + say('bot 仍可用 ego_tabs 列标签、ego_read 读快照。恢复只代表浏览器可用，原脚本结果仍未知，不能自动重放。纯等待请用 ego_wait。', 'The bot can still use ego_tabs and ego_read. Recovery only establishes browser availability; the script outcome stays unknown and must not be replayed automatically. Use ego_wait for simple delays.');
   } else if (status.halted) {
     const user = status.code === 'EGO_TASK_SPACE_USER_IN_CONTROL';
     title = user ? say('浏览器由你操作', 'You control the browser') : say('操作已暂停，等待确认', 'Automation paused for review');
@@ -40,6 +44,7 @@ export function panelView(status: EgoPanelStatus, zh = true) {
     title = status.watching ? say('正在观看视频', 'Watching a video') : say('浏览器已连接', 'Browser connected');
     detail = status.watching ? say(`正在采集页面 ${status.watching} 的画面和可用字幕。`, `Sampling frames and available subtitles from ${status.watching}.`)
       : say('bot 可以浏览网页；只有主动开始观看时才采集视频。', 'The bot can browse. Video is sampled only after an explicit watch request.');
+    if (status.lastUnknownEvaluation) detail += say('上次超时脚本结果仍未知；继续任务前需核对页面，不能自动重放可能的提交。', 'The last timed-out script outcome is still unknown; inspect the page before continuing and do not automatically replay a possible submission.');
   } else if (directBlocked) {
     title = say('直接连接受权限限制', 'Direct connection is blocked by elevation');
     detail = say('将连接方式改为「自动选择」或「普通权限助手」，再重启这个 World；宿主可继续保留管理员权限。', 'Choose Automatic or Helper mode, then restart this World. The host can stay elevated.');

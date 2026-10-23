@@ -15,7 +15,7 @@ export const EGO: WorldDefinition<EgoConfigSection> = {
       ego_open: { zh: '在专用 Space 打开网页或 BV 视频。', en: 'Open a web page or Bilibili video in the dedicated Space.' },
       ego_navigate: { zh: '让已有页面转到新地址。', en: 'Navigate a managed page.' },
       ego_tabs: { zh: '列出专用 Space 的页面。', en: 'List tabs in the dedicated Space.' },
-      ego_read: { zh: '读取可分页的网页结构与操作引用。', en: 'Read a paginated semantic snapshot.' },
+      ego_read: { zh: '读取可分页的网页结构与操作引用，页面求值超时后仍可只读诊断。', en: 'Read a paginated semantic snapshot, including diagnosis after a page-evaluation timeout.' },
       ego_click: { zh: '点击网页元素并报告弹出页。', en: 'Click an element and report popup pages.' },
       ego_fill: { zh: '填写网页输入框。', en: 'Fill an input.' },
       ego_press: { zh: '向元素发送按键。', en: 'Send keys to an element.' },

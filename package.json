@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-ego",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "type": "module",
   "author": { "name": "筆離嘢" },
   "description": "Ego 浏览器 —— 专为 AI 打造的浏览器 World，让你家的小肥鱼上网、看图、看视频更顺手。Cortico 与 Coopanion 共用官方 ego-browser 接口，在独立 Space 里开网页、点击填表、截图，观看 HTML5 / B 站视频的画面、字幕与弹幕。需先安装 Ego Lite。",

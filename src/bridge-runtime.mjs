@@ -1,6 +1,7 @@
 /** Executed by the official ego-browser Node runtime, whose helpers are globals. */
 import { videoOperation } from './video-page.mjs';
 import { bilibiliDanmaku, decodeDanmakuSegment } from './bilibili-danmaku.mjs';
+import { bilibiliComments } from './bilibili-comments.mjs';
 import { readFile } from 'node:fs/promises';
 
 function errorCode(error) {
@@ -71,7 +72,7 @@ export async function execute({ operation, args }) {
           if (entry.openedBy !== 'agent') throw new Error('This page is user-owned; it cannot be closed by this World.');
           await page.close(); value = { closed: args.page }; break;
         case 'video': value = await runVideo(task, page, args); break;
-        case 'bilibili': value = await page.evaluate(bilibiliQuery, args); break;
+        case 'bilibili': value = await page.evaluate(args.action === 'comments' ? bilibiliComments : bilibiliQuery, args); break;
         default: throw new Error(`Unsupported operation ${operation}`);
       }
     }
@@ -226,12 +227,11 @@ async function bilibiliQuery(args) {
   let url;
   if (args.action === 'search') url = `https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=${encodeURIComponent(args.query)}&page=1`;
   else if (args.action === 'related') url = `https://api.bilibili.com/x/web-interface/archive/related?bvid=${encodeURIComponent(args.bvid ?? info?.bvid ?? '')}`;
-  else url = `https://api.bilibili.com/x/v2/reply/main?type=1&oid=${Number(info?.aid)}&mode=3&next=0`;
+  else throw new Error('Unsupported Bilibili query action.');
   const response = await fetch(url, { credentials: 'include', signal: AbortSignal.timeout(8000) });
   if (!response.ok) throw new Error(`Bilibili HTTP ${response.status}`);
   const json = await response.json();
   if (json.code !== 0) throw new Error(`Bilibili API ${json.code}: ${json.message}`);
-  const data = args.action === 'search' ? json.data?.result : args.action === 'related' ? json.data : json.data?.replies;
-  return (data ?? []).slice(0, 10).map(i => args.action === 'comments' ? { user: i.member?.uname, text: i.content?.message, likes: i.like }
-    : { bvid: i.bvid, title: String(i.title).replace(/<[^>]*>/g, ''), author: i.author ?? i.owner?.name, url: `https://www.bilibili.com/video/${i.bvid}` });
+  const data = args.action === 'search' ? json.data?.result : json.data;
+  return (data ?? []).slice(0, 10).map(i => ({ bvid: i.bvid, title: String(i.title).replace(/<[^>]*>/g, ''), author: i.author ?? i.owner?.name, url: `https://www.bilibili.com/video/${i.bvid}` }));
 }

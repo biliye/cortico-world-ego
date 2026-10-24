@@ -45,6 +45,16 @@ beforeEach(async () => {
   await world.start(host());
 });
 
+it.each(['target-unavailable', 'error', 'empty', 'available'])('exposes structured comments status %s and marks only failures', async status => {
+  browser.next = { spaceId: 1, value: { status, video: { aid: 170001, bvid: 'BV17x411w7KC', title: '视频' }, comments: [], error: status === 'error' ? 'Bilibili HTTP 403' : undefined } };
+  const result = await call('bilibili', { page: 'p1', action: 'comments', aid: 170001 });
+  expect(result.failed === true).toBe(['target-unavailable', 'error'].includes(status));
+  expect(result.text).toContain(`"status":"${status}"`);
+  expect(result.text).toContain('"aid":170001');
+  if (status === 'error') expect(result.text).toContain('Bilibili HTTP 403');
+  expect(browser.calls.at(-1)).toMatchObject({ op: 'bilibili', args: { aid: 170001 } });
+});
+
 describe('per-watch video-time sampling', () => {
   async function advance(ms: number) {
     while (ms > 0) { const step = Math.min(ms, 1000); await vi.advanceTimersByTimeAsync(step); await (world as any).queue; ms -= step; }

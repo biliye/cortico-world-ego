@@ -393,6 +393,7 @@ export class EgoWorld implements World {
       const diagnostic = this.isEvaluationDiagnostic(operation);
       const value = await this.command(operation, args, signal);
       const result = this.outcome(value, operation === 'read' ? Number(args.offset ?? 0) : 0, Number(args.maxChars ?? this.options.cfg.maxChars));
+      if (operation === 'bilibili' && args.action === 'comments' && ['target-unavailable', 'error'].includes(value?.status)) result.failed = true;
       if (diagnostic) result.text += '\nRead-only diagnosis only. The page-evaluation pause remains; pending JavaScript may still produce late effects. Do not repeat the timed-out script. Background diagnosis restores operations only after control and page checks pass; reading alone does not clear this pause.';
       return result;
     }

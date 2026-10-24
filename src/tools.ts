@@ -26,6 +26,8 @@ export const EGO_TOOL_DECLS: readonly ToolSpec[] = [
     frameId: text('Optional frameId from inspection; omitted scans current page frames.'), selector: text('Optional CSS video selector in that frame.'),
     index: { type: 'integer', minimum: 0 }, time: { type: 'number', minimum: 0 }, since: { type: 'number', minimum: 0, description: 'Subtitle/danmaku interval start in video seconds; default last 15 s. Does not request past video frames.' },
   }, ['page', 'action']),
-  tool('bilibili', 'Search Bilibili videos, list related videos or read comments through the current Bilibili page login. Returns up to 10 results. Read-only; does not post comments.', {
-    page, action: { type: 'string', enum: ['search', 'related', 'comments'] }, query: text('Search keywords; required for search.'), bvid: text('Optional BV id for related videos.') }, ['page', 'action'], true),
+  tool('bilibili', 'Search Bilibili videos, list related videos or read comments using the specified Bilibili page login, without navigation. Up to 10 results. For comments, pass aid/bvid to select a video; omit both to use the page video URL. Comments return {status, video:{aid,bvid,title}, comments}; status is available, empty (this API list only), target-unavailable or error. Failed requests never mean no comments. Search/related still return arrays. Read-only; does not post comments.', {
+    page, action: { type: 'string', enum: ['search', 'related', 'comments'] }, query: text('Search keywords; required for search.'),
+    bvid: text('Optional BV id for related or comments. For comments, both aid and bvid, if supplied, must identify the same video.'),
+    aid: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER, description: 'Optional numeric video aid for comments only. Explicit aid/bvid overrides the page video.' } }, ['page', 'action'], true),
 ];

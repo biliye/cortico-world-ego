@@ -43,7 +43,7 @@ try {
   do {
     if (Test-HelperReady $helperProcess.Id) { Write-Host 'Ego 助手已启动，请回到面板点击「连接浏览器」。'; exit 0 }
     $helperProcess.Refresh()
-    if ($helperProcess.HasExited) { throw ('助手进程已退出，退出码：' + $helperProcess.ExitCode) }
+    if ($helperProcess.HasExited) { $exitCode = $helperProcess.ExitCode; if ($null -eq $exitCode) { throw '助手进程已退出，没有拿到退出码。' } else { throw ('助手进程已退出，退出码：' + $exitCode) } }
     Start-Sleep -Milliseconds 200
   } while ([DateTime]::UtcNow -lt $deadline)
   throw '10 秒内未能确认助手启动成功。请查看下方日志；确认原因后再运行脚本。'

@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execute } from '../src/bridge-runtime.mjs';
+import { MAX_FILE_BYTES } from '../src/file-transfer.mjs';
+import { runInNewContext } from 'node:vm';
 let dir: string;
 let task: any, page: any, calls: any[], pending: any[];
 beforeEach(async () => {
@@ -87,6 +89,76 @@ it('returns a serializable null when page JavaScript returns undefined', async (
   page.evaluate = async () => undefined;
   const result = await execute({ operation: 'evaluate', args: { page: 'p1', expression: 'undefined' } });
   expect(JSON.parse(JSON.stringify(result)).value).toBe(null);
+});
+
+it('uses the file input or arms the dynamic chooser before clicking', async () => {
+  const transferFile = join(dir, 'photo.png');
+  const args = { page: 'p1', selector: '#upload', transferFile, transferTimeoutMs: 3000 };
+  page.setInputFiles = vi.fn();
+  await execute({ operation: 'upload', args });
+  expect(page.setInputFiles).toHaveBeenCalledWith('#upload', [transferFile]);
+
+  const setFiles = vi.fn(() => ({ dialog: { message: 'Confirm' } }));
+  page.waitForFileChooser = vi.fn(async () => { calls.push('arm'); return { setFiles }; });
+  page.click = vi.fn(async () => { calls.push('click'); });
+  expect(await execute({ operation: 'upload', args: { ...args, chooser: true } })).toMatchObject({ value: { dialog: { message: 'Confirm' } } });
+  expect(calls).toEqual(['arm', 'click']);
+  expect(setFiles).toHaveBeenCalledWith(transferFile);
+});
+
+it('arms download before clicking and copies only the completed bounded artifact', async () => {
+  const bytes = Buffer.from([0, 255, 127]);
+  const fixture = join(dir, 'fixture.zip');
+  const transferFile = join(dir, 'download');
+  await writeFile(fixture, bytes);
+  page.waitForEvent = vi.fn(async () => { calls.push('arm'); return { path: async () => fixture, suggestedFilename: () => 'report.zip' }; });
+  page.click = vi.fn(async () => { calls.push('click'); });
+  expect(await execute({ operation: 'download', args: { page: 'p1', selector: '#download', transferFile, transferTimeoutMs: 3000 } })).toMatchObject({ value: { name: 'report.zip' } });
+  expect(calls).toEqual(['arm', 'click']);
+  expect(page.waitForEvent).toHaveBeenCalledWith('download', { timeout: 3000 });
+  expect(await readFile(transferFile)).toEqual(bytes);
+});
+
+it.each(['readable', 'lost control', 'dialog', 'pending click'])('diagnoses a missing download event with %s', async state => {
+  const error = new Error('page.waitForEvent("download") timed out after 25000ms');
+  page.waitForEvent = vi.fn(() => new Promise((_, reject) => setImmediate(() => reject(error))));
+  page.click = vi.fn(async () => state === 'pending click'
+    ? new Promise(() => {})
+    : { dialog: state === 'dialog' ? { message: 'Confirm?' } : undefined });
+  page.snapshot = vi.fn(async () => 'ready');
+  task.waitForControl = vi.fn(async () => {});
+  if (state === 'lost control') task.waitForControl.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('user took control'));
+
+  const args = { page: 'p1', selector: '#download', transferFile: join(dir, 'download'), transferTimeoutMs: 43500 };
+  const result = await execute({ operation: 'download', args });
+  expect(page.waitForEvent).toHaveBeenCalledWith('download', { timeout: 25000 });
+  expect(page.click).toHaveBeenCalledOnce();
+  expect(result).toMatchObject({ code: 'EGO_DOWNLOAD_START_TIMEOUT', uncertain: state !== 'readable' });
+  expect(result.error).toContain('download outcome is unknown');
+  if (state === 'readable' || state === 'lost control') {
+    expect(task.waitForControl).toHaveBeenCalledTimes(2);
+    expect(page.snapshot).toHaveBeenCalledOnce();
+  } else {
+    expect(task.waitForControl).not.toHaveBeenCalled();
+    expect(page.snapshot).not.toHaveBeenCalled();
+  }
+});
+
+it('bounds direct downloads even when no content length is provided', async () => {
+  const bytes = Uint8Array.from([0, 255, 127]);
+  let responseBytes = bytes;
+  const fixtureFetch = vi.fn(async (_url: URL) => new Response(responseBytes, { headers: { 'content-type': 'image/png' } }));
+  page.evaluate = (fn: Function, args: any) => runInNewContext(`(${fn.toString()})(args)`, {
+    args, URL, fetch: fixtureFetch, AbortController, document: { baseURI: 'https://example.com/current' }, setTimeout, clearTimeout, btoa,
+  });
+  const transferFile = join(dir, 'download');
+  const args = { page: 'p1', url: '/images/photo.png', transferFile, transferTimeoutMs: 3000 };
+  expect(await execute({ operation: 'download', args })).toMatchObject({ value: { name: 'photo.png', mime: 'image/png' } });
+  expect(String(fixtureFetch.mock.lastCall?.[0])).toBe('https://example.com/images/photo.png');
+  expect(await readFile(transferFile)).toEqual(Buffer.from(bytes));
+  responseBytes = new Uint8Array(MAX_FILE_BYTES + 1);
+  expect(await execute({ operation: 'download', args })).toMatchObject({ error: 'File exceeds the 8 MiB transfer limit.' });
+  expect(await readFile(transferFile)).toEqual(Buffer.from(bytes));
 });
 it('preserves responsive pending-Promise timeout metadata without claiming the script stopped', async () => {
   page.evaluate = async () => { throw Object.assign(new Error('page.evaluate timed out after 15000ms; evaluation still pending'), {

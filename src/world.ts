@@ -1,9 +1,10 @@
-import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import type { ToolDef, ToolOutcome, World, WorldHost, WorldWebUiDecl } from 'cortico/core/types.ts';
+import { mimeOfHandle } from 'cortico/core/blobs.ts';
 import { nowIso } from 'cortico/core/util.ts';
 import { CliBridge, type EgoBridge, type BridgeReceipt, type EvaluationTimeout } from './bridge.ts';
 import { bounded, egoConfigGroup, type EgoConfigSection } from './config.ts';
@@ -11,8 +12,15 @@ import { EGO_TOOL_DECLS } from './tools.ts';
 import { AutoBridge, HelperBridge } from './helper-bridge.ts';
 import { prepareHelperLauncher } from './helper-launcher.ts';
 import { isConnectionFailure, normalizeFailure } from './failures.ts';
+import { MAX_FILE_BYTES, safeFilename } from './file-transfer.mjs';
 import { captureOptions, samplingOverride, samplingPlan, samplingSummary, targetOffset, type SamplingOverride, type SamplingPlan } from './sampling.ts';
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
+const UPLOAD_RETENTION_MS = 24 * 60 * 60 * 1000;
+const DOWNLOAD_EXTENSIONS: Readonly<Record<string, string>> = {
+  'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif', 'image/webp': '.webp',
+  'image/bmp': '.bmp', 'image/avif': '.avif', 'image/svg+xml': '.svg',
+  'application/pdf': '.pdf', 'application/zip': '.zip',
+};
 const STOP_CODES = /EGO_TASK_SPACE_(USER_IN_CONTROL|INACTIVE|NAME_IN_USE|NOT_FOUND|NOT_SELECTED|UNAVAILABLE)|EGO_TASK_HOST_DISCONNECTED/;
 interface Watch {
   page: string; frameId?: string; selector?: string; index?: number; since: number; source?: string; generation: number;
@@ -388,6 +396,7 @@ export class EgoWorld implements World {
   private async invokeTool(operation: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome> {
     const args = validate(operation, input);
     if (operation === 'handoff') return this.handoff();
+    if (operation === 'upload' || operation === 'download') return this.transferFile(operation, args, signal);
     if ((operation === 'close' || operation === 'navigate') && (this.watch?.page === args.page || [...this.pendingScenes].some(scene => scene.page === args.page))) this.cancelWatch();
     if (operation !== 'video') {
       const diagnostic = this.isEvaluationDiagnostic(operation);
@@ -445,6 +454,56 @@ export class EgoWorld implements World {
     delete scene.image; delete scene.capture; delete scene.frameTimes; delete scene.frameCount;
     this.schedule(watch);
     return this.outcome(scene);
+  }
+  private async transferFile(operation: 'upload' | 'download', args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome> {
+    const transferTimeoutMs = bounded(this.options.cfg.requestTimeoutMs, 5000, 120000, 45000) - 1500;
+    if (operation === 'upload') {
+      const handle = String(args.handle);
+      const source = this.host?.blob(handle);
+      if (!source) throw new Error('Workspace file unavailable. Use a valid mem: handle.');
+      if (source.bytes.byteLength > MAX_FILE_BYTES) throw new Error('File exceeds the 8 MiB transfer limit.');
+      const name = safeFilename(basename(handle.slice(4)));
+      const dir = resolve(this.options.dataDir, 'ego', 'uploads');
+      await mkdir(dir, { recursive: true });
+      // A selected file is read from disk again when the page later submits it.
+      const cutoff = Date.now() - UPLOAD_RETENTION_MS;
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !/^file-[a-z0-9]{6}$/i.test(entry.name)) continue;
+        const old = join(dir, entry.name);
+        const info = await stat(old).catch(() => undefined);
+        if (info && info.mtimeMs < cutoff) await rm(old, { recursive: true, force: true }).catch(() => {});
+      }
+      const stage = await mkdtemp(join(dir, 'file-'));
+      const transferFile = join(stage, name);
+      try { await writeFile(transferFile, source.bytes, { flag: 'wx', mode: 0o600 }); }
+      catch (error) { await rm(stage, { recursive: true, force: true }); throw error; }
+      const receipt = await this.command(operation, { page: args.page, selector: args.selector, chooser: args.chooser, transferFile, transferTimeoutMs }, signal);
+      return this.outcome({ name, bytes: source.bytes.byteLength, selected: true, dialog: receipt?.dialog }, 0, this.options.cfg.maxChars);
+    }
+
+    const dir = resolve(this.options.dataDir, 'ego', 'transfers');
+    await mkdir(dir, { recursive: true });
+    const stage = await mkdtemp(join(dir, 'file-'));
+    try {
+      const transferFile = join(stage, 'download');
+      const result = await this.command(operation, { page: args.page, selector: args.selector, url: args.url, transferFile, transferTimeoutMs }, signal);
+      signal?.throwIfAborted();
+      this.lifetime.signal.throwIfAborted();
+      if ((await stat(transferFile)).size > MAX_FILE_BYTES) throw new Error('File exceeds the 8 MiB transfer limit.');
+      const bytes = await readFile(transferFile);
+      let filename = safeFilename(result?.name);
+      const contentType = typeof result?.mime === 'string' ? result.mime.split(';', 1)[0].trim().toLowerCase() : '';
+      const filenameMime = /\.jpeg$/i.test(filename) ? 'image/jpeg' : mimeOfHandle(filename);
+      const mime = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(contentType) && contentType !== 'application/octet-stream'
+        ? contentType : filenameMime;
+      const extension = DOWNLOAD_EXTENSIONS[mime];
+      if (extension && filenameMime !== mime && !filename.toLowerCase().endsWith(extension)) filename += extension;
+      const path = `blobs/downloads/${randomUUID()}-${filename}`;
+      return { text: `Downloaded ${JSON.stringify(filename)} (${bytes.byteLength} bytes). Use save_blob with the log: handle below and path ${path} to keep it in the workspace.`,
+        blobs: [{ bytes, mime, name: filename, fallbackText: 'Ego downloaded file.' }] };
+    } finally {
+      await rm(stage, { recursive: true, force: true, maxRetries: 3 });
+    }
   }
   private samplingStatus(watch: Watch) {
     const next = samplingPlan(this.options.cfg, watch.pendingOverride ?? watch.override);
@@ -581,7 +640,18 @@ function validate(operation: string, input: Record<string, unknown>): Record<str
     if (properties[key]?.type === 'string' && (typeof args[key] !== 'string' || (key !== 'text' && !String(args[key]).trim()))) throw new Error(`${key} must be a non-empty string.`);
   }
   if (args.page && !/^p[1-9][0-9]*$/.test(String(args.page))) throw new Error('Invalid page label; use ego_tabs.');
-  if (args.url !== undefined) args.url = normalizeUrl(String(args.url).trim());
+  if (args.url !== undefined && operation !== 'download') args.url = normalizeUrl(String(args.url).trim());
+  if (operation === 'upload') {
+    const path = String(args.handle).slice(4);
+    if (!String(args.handle).startsWith('mem:') || /[\\:\x00-\x1f]/.test(path) || path.split('/').some(part => !part || part.startsWith('.'))) {
+      throw new Error('Use a mem: handle for a workspace file, e.g. mem:blobs/photo.png.');
+    }
+    if (args.chooser !== undefined && typeof args.chooser !== 'boolean') throw new Error('chooser must be a boolean.');
+  }
+  if (operation === 'download') {
+    const targets = [args.selector, args.url].filter(value => value !== undefined);
+    if (targets.length !== 1 || typeof targets[0] !== 'string' || !targets[0].trim()) throw new Error('Provide exactly one non-empty selector or url.');
+  }
   for (const key of ['time', 'since', 'offset', 'maxChars', 'index', 'deltaY', 'x', 'y']) {
     if (args[key] !== undefined && (typeof args[key] !== 'number' || !Number.isFinite(args[key]))) throw new Error(`${key} must be a finite number.`);
   }

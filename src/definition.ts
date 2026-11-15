@@ -18,6 +18,8 @@ export const EGO: WorldDefinition<EgoConfigSection> = {
       ego_read: { zh: '读取可分页的网页结构与操作引用，页面求值超时后仍可只读诊断。', en: 'Read a paginated semantic snapshot, including diagnosis after a page-evaluation timeout.' },
       ego_click: { zh: '点击网页元素并报告弹出页。', en: 'Click an element and report popup pages.' },
       ego_fill: { zh: '填写网页输入框。', en: 'Fill an input.' },
+      ego_upload: { zh: '用工作区文件填入网页上传框或文件选择器。', en: 'Select a workspace file for a page upload.' },
+      ego_download: { zh: '从网页下载文件为附件，可用 save_blob 存进工作区。', en: 'Download a page file as an attachment that save_blob can keep in the workspace.' },
       ego_press: { zh: '向元素发送按键。', en: 'Send keys to an element.' },
       ego_scroll: { zh: '滚动网页。', en: 'Scroll a page.' },
       ego_evaluate: { zh: '在网页中执行 JavaScript。', en: 'Evaluate JavaScript inside the page.' },

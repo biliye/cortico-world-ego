@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { videoOperation } from '../src/video-page.mjs';
 import { EgoWorld, normalizeUrl } from '../src/world.ts';
 import { EGO_DEFAULTS } from '../src/config.ts';
 import { EGO } from '../src/definition.ts';
+import { MAX_FILE_BYTES } from '../src/file-transfer.mjs';
 import type { BridgeReceipt, EgoBridge } from '../src/bridge.ts';
 import type { DeferredEventSpec, EventEnvelope, WorldHost, ToolOutcome } from 'cortico/core/types.ts';
 import { nullLogger } from 'cortico/core/util.ts';
@@ -31,8 +32,9 @@ class Browser implements EgoBridge {
 let dir: string, world: EgoWorld, browser: Browser;
 let events: EventEnvelope[], deferred: DeferredEventSpec[];
 let cfg: typeof EGO_DEFAULTS;
+let blobs: WorldHost['blob'];
 function host(): WorldHost {
-  return { log: nullLogger(), pushEvent: async (e: any) => { events.push(e); return e; }, pushDeferred: (e: DeferredEventSpec) => { deferred.push(e); } } as unknown as WorldHost;
+  return { log: nullLogger(), blob: (handle: string) => blobs(handle), pushEvent: async (e: any) => { events.push(e); return e; }, pushDeferred: (e: DeferredEventSpec) => { deferred.push(e); } } as unknown as WorldHost;
 }
 async function call(name: string, args: Record<string, unknown> = {}): Promise<ToolOutcome> {
   const value = await world.tools().find(t => t.name === `ego_${name}`)!.handler(args, { role: 'test', log: nullLogger() });
@@ -41,8 +43,60 @@ async function call(name: string, args: Record<string, unknown> = {}): Promise<T
 beforeEach(async () => {
   dir = await mkdtemp(join(process.cwd(), '.test-data-'));
   events = []; deferred = []; browser = new Browser(); cfg = structuredClone(EGO_DEFAULTS);
+  blobs = () => null;
   world = new EgoWorld({ cfg, dataDir: dir, botDir: dir, timezone: 'Asia/Shanghai', bridge: browser });
   await world.start(host());
+});
+
+it('keeps a selected workspace file readable for the later submit call', async () => {
+  const bytes = Buffer.from([0, 255, 127]);
+  blobs = handle => handle === 'mem:blobs/附件.zip' ? { bytes, mime: 'application/zip' } : null;
+  const result = await call('upload', { page: 'p1', selector: '#file', handle: 'mem:blobs/附件.zip' });
+  expect(result.failed).toBeUndefined();
+  expect(result.text).toContain('附件.zip');
+  const request = browser.calls.find(c => c.op === 'upload')!;
+  expect(request.args).toMatchObject({ page: 'p1', selector: '#file' });
+  expect(await readFile(String(request.args.transferFile))).toEqual(bytes);
+  expect(result.text).not.toContain(String(request.args.transferFile));
+});
+
+it('validates transfer arguments and size before calling the browser', async () => {
+  const resolveBlob = vi.fn(() => ({ bytes: new Uint8Array(MAX_FILE_BYTES + 1), mime: 'application/octet-stream' }));
+  blobs = resolveBlob;
+  for (const handle of ['C:/file.pdf', 'mem:../file.pdf', 'mem:.git/config', 'log:abc']) {
+    expect(await call('upload', { page: 'p1', selector: '#file', handle })).toMatchObject({ failed: true });
+  }
+  expect(resolveBlob).not.toHaveBeenCalled();
+  expect((await call('upload', { page: 'p1', selector: '#file', handle: 'mem:file.bin' })).text).toContain('8 MiB');
+  expect(await call('download', { page: 'p1', selector: '#download', url: '/photo.png' })).toMatchObject({ failed: true });
+  expect(browser.calls.map(c => c.op)).toEqual(['connect']);
+});
+
+it('returns a byte-identical attachment with a unique workspace path and cleans staged downloads', async () => {
+  const bytes = Buffer.from([0, 255, 127]);
+  browser.run = async (_op, args) => {
+    expect(args.url).toBe('/private/photo');
+    await writeFile(String(args.transferFile), bytes);
+    return { spaceId: 1, value: { name: 'photo', mime: 'image/png; charset=utf-8' } };
+  };
+  const first = await call('download', { page: 'p1', url: '/private/photo' });
+  const second = await call('download', { page: 'p1', url: '/private/photo' });
+  const path = /blobs\/downloads\/[\w-]+-photo\.png/;
+  expect(first.text).toMatch(path);
+  expect(first.text.match(path)?.[0]).not.toBe(second.text.match(path)?.[0]);
+  expect(first.blobs?.[0]).toMatchObject({ name: 'photo.png', mime: 'image/png', bytes });
+  expect(await readdir(join(dir, 'ego', 'transfers'))).toEqual([]);
+});
+
+it('keeps the World available after a download start timeout with a successful same-page check', async () => {
+  browser.next = { spaceId: 1, code: 'EGO_DOWNLOAD_START_TIMEOUT', error: 'The download outcome is unknown.', uncertain: false };
+  expect(await call('download', { page: 'p1', selector: '#download' })).toMatchObject({ failed: true });
+  expect(world.status()).toMatchObject({ connected: true, halted: false });
+  expect((await call('read', { page: 'p1' })).failed).toBeUndefined();
+
+  browser.next = { spaceId: 1, code: 'EGO_DOWNLOAD_START_TIMEOUT', error: 'The download outcome is unknown.', uncertain: true };
+  expect(await call('download', { page: 'p1', selector: '#download' })).toMatchObject({ failed: true });
+  expect(world.status()).toMatchObject({ connected: false, halted: true });
 });
 
 it.each(['target-unavailable', 'error', 'empty', 'available'])('exposes structured comments status %s and marks only failures', async status => {

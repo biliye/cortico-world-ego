@@ -13,6 +13,14 @@ export const EGO_TOOL_DECLS: readonly ToolSpec[] = [
   tool('read', 'Read a semantic snapshot with refs. Defaults to the viewport. Use fullPage for the whole page and offset/maxChars to paginate.', { page, fullPage: { type: 'boolean' }, offset: { type: 'integer', minimum: 0 }, maxChars: { type: 'integer', minimum: 100, maximum: 60000 } }, ['page'], true),
   tool('click', 'Click one element. Returns a snapshot and any popup page labels.', { page, selector: element }, ['page', 'selector']),
   tool('fill', 'Fill an editable element. Returns a snapshot.', { page, selector: element, text: text('Input value.') }, ['page', 'selector', 'text']),
+  tool('upload', 'Select one workspace file for a page upload (up to 8 MiB). Check the page for any separate submit step.', {
+    page, selector: element, handle: text('mem: handle, e.g. mem:blobs/photo.png.'),
+    chooser: { type: 'boolean', description: 'True if the selector opens a file chooser. Otherwise target the file input directly.' },
+  }, ['page', 'selector', 'handle']),
+  tool('download', 'Download one file (up to 8 MiB) as a log: attachment. Use save_blob with the suggested path to keep it in the workspace.', {
+    page, selector: text('Element that starts a browser download. Provide exactly one of selector or url.'),
+    url: text('Direct file URL, absolute HTTP(S), page-relative or blob:. Uses this page and follows CORS. Provide exactly one of url or selector.'),
+  }, ['page']),
   tool('press', 'Send a key to an element. Returns a snapshot.', { page, selector: element, key: text('Key or chord, e.g. Enter or ControlOrMeta+A.') }, ['page', 'selector', 'key']),
   tool('scroll', 'Scroll vertically at a viewport position in CSS pixels. Returns a snapshot.', { page, deltaY: { type: 'number' }, x: { type: 'number' }, y: { type: 'number' } }, ['page', 'deltaY']),
   tool('evaluate', 'Run JavaScript in the page and return JSON. Page-only APIs. Use ego_wait for delays; evaluation is limited to about 15 seconds.', { page, expression: text('JavaScript expression or function expression.') }, ['page', 'expression']),

@@ -59,11 +59,19 @@ Ego 会在执行浏览器脚本之前拒绝管理员身份的 `ego-browser`，�
 | `ego_open` / `ego_navigate` / `ego_tabs` | 打开网址或 BV 号、导航已有页、列出本 Space 的页面 |
 | `ego_read` | 读取带操作引用的语义快照，支持 `fullPage`、`offset`、`maxChars` |
 | `ego_click` / `ego_fill` / `ego_press` / `ego_scroll` | 点击、填表、按键、滚动 |
+| `ego_upload` / `ego_download` | 将工作区文件选入网页上传框，或将网页文件下载为附件 |
 | `ego_evaluate` / `ego_shot` / `ego_close` | 页内 JavaScript、视口图片附件、关闭 bot 创建的页 |
 | `ego_wait` | 在宿主等待 0–60 秒，不执行页面脚本，不挡住视频采样 |
 | `ego_video` | 视频状态、播放、暂停、跳转、画面和字幕、持续观看 |
 | `ego_bilibili` | B 站搜索、推荐与评论，只读 |
 | `ego_handoff` | 交给操作员，停止操作与采集 |
+
+每次传输一个文件，最大 8 MiB。
+
+- 上传用 `ego_upload {page, selector, handle:"mem:blobs/photo.png"}`。如果 `selector` 指向打开文件选择器的按钮，加 `chooser:true`。选中文件后检查页面，按需要另点提交。浏览器后续提交仍需读取暂存文件，暂存超过 24 小时后会在下一次上传时清理。
+- 下载用 `ego_download {page, selector}` 点击下载链接或按钮，或用 `ego_download {page, url}` 直接读取网页文件。直接读取沿用页面的同源登录态和浏览器跨域规则。工具返回 `log:` 附件。需要留在工作区时，把句柄和建议的 `blobs/downloads/` 路径交给 `save_blob`，得到可再次上传的 `mem:` 句柄。
+- 点击下载最多等 25 秒接收开始事件，仍受命令总时限约束。若点击已完成，且 Ego 能复核原 Space 控制权并读取同一页面，可继续用 `ego_read` 或 `ego_tabs` 检查下载结果。遇到弹窗、控制权丢失、页面无法读取或下载完成超时，需先核对浏览器状态。
+- 文件传输从 0.1.14 开始提供。升级并重启宿主后，在「提示词」页点「重载系统前缀」。使用普通权限助手的宿主需要停止旧助手、重新生成启动脚本并启动新版助手。
 
 先用 `ego_open {url}` 打开页面，之后使用返回的 `page`（例如 `p1`）。`ego_video {page, action:"inspect"}` 查视频状态；`look` 立即取当前画面及已有采样缓存，不等待 15 秒，也不能通过 `since` 恢复过去的画面。要看一段时间内的变化，调用一次 `watch` 播放并开始定期观察，等待后续 `ego.video.scene`；不要反复调用 `watch`，它会重置采样。`pause`、`seek`（额外传 `time` 秒数）或 `exit` 结束观察。视频有多个 frame 或播放器时，用返回的 `frameId` 配合 `index` 或 `selector` 选择；跨域 iframe 也可使用。
 

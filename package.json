@@ -1,9 +1,9 @@
 {
   "name": "cortico-world-ego",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "type": "module",
   "author": { "name": "筆離嘢" },
-  "description": "Ego 浏览器 —— 专为 AI 打造的浏览器 World，让你家的小肥鱼上网、看图、看视频更顺手。Cortico 与 Coopanion 共用官方 ego-browser 接口，在独立 Space 里开网页、点击填表、截图，观看 HTML5 / B 站视频的画面、字幕与弹幕。需先安装 Ego Lite。",
+  "description": "Ego 浏览器 —— 让你家的小肥鱼上网、传文件、看图和看视频。Cortico 与 Coopanion 共用官方 ego-browser 接口，在独立 Space 里浏览网页、上传与下载文件、截图，观看 HTML5 / B 站视频的画面、字幕与弹幕。需先安装 Ego Lite。",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/biliye/cortico-world-ego.git" },
   "homepage": "https://github.com/biliye/cortico-world-ego#readme",
@@ -15,7 +15,7 @@
   "cortico": {
     "kind": "world", "api": 6, "displayName": "Ego 浏览器", "icon": "assets/icon.webp",
     "tags": ["internet", "browser", "video", "external-setup", "high-cost"],
-    "locales": { "en": { "displayName": "Ego Browser", "description": "Ego Browser — a browser built for AI, so your little fat fish (小肥鱼) browses, reads pages and watches videos more smoothly. For Cortico and Coopanion via the official ego-browser API: isolated task spaces, browsing, forms, screenshots, HTML5/Bilibili video frames, subtitles and danmaku. Requires an installed Ego Lite." } },
+    "locales": { "en": { "displayName": "Ego Browser", "description": "Ego Browser helps your little fat fish (小肥鱼) browse, upload and download files, take screenshots, and watch HTML5 or Bilibili video with frames, subtitles and danmaku. For Cortico and Coopanion. Requires Ego Lite." } },
     "describe": "describe.json", "webUiClient": "dist/webui.js"
   },
   "files": ["src", "dist", "assets", "README.md", "describe.json", "CHANGELOG.md", "LICENSE", "THIRD_PARTY_NOTICES.md"],

@@ -40,6 +40,9 @@ export class HelperBridge implements EgoBridge {
         body: JSON.stringify({ operation, args }), signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       });
       const receipt = await response.json() as BridgeReceipt;
+      if (response.status === 400 && receipt?.error === 'Unsupported operation or arguments' && ['upload', 'download'].includes(operation)) {
+        return { error: 'The running Ego helper does not support file transfer. Stop it, regenerate its launcher and start it again.', code: 'EGO_HELPER_VERSION', uncertain: false };
+      }
       if (!response.ok || !receipt || typeof receipt !== 'object' || (!('value' in receipt) && !receipt.error)) throw new Error(`Ego helper HTTP ${response.status}: invalid receipt`);
       return normalizeFailure(receipt);
     } catch (error) { return { error: `Ego helper connection interrupted: ${String(error)}`, code: !signal?.aborted && (error as Error).name === 'TimeoutError' ? 'EGO_COMMAND_TIMEOUT' : undefined, uncertain: true }; }

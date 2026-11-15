@@ -2,6 +2,7 @@
 import { videoOperation } from './video-page.mjs';
 import { bilibiliDanmaku, decodeDanmakuSegment } from './bilibili-danmaku.mjs';
 import { bilibiliComments } from './bilibili-comments.mjs';
+import { downloadFile, uploadFile } from './file-transfer.mjs';
 import { readFile } from 'node:fs/promises';
 
 function errorCode(error) {
@@ -62,6 +63,8 @@ export async function execute({ operation, args }) {
           value = { receipt, snapshot: await page.snapshot(), pages: await inventory(task) }; break;
         }
         case 'fill': await page.fill(args.selector, args.text); value = await page.snapshot(); break;
+        case 'upload': value = await uploadFile(page, args); break;
+        case 'download': value = await downloadFile(task, page, args); break;
         case 'press': await page.press(args.selector, args.key); value = await page.snapshot(); break;
         case 'scroll': await page.mouse.move(args.x ?? 500, args.y ?? 400); await page.mouse.wheel(0, args.deltaY, { label: 'scroll page content' }); value = await page.snapshot(); break;
         case 'evaluate': value = await page.evaluate(args.expression); break;

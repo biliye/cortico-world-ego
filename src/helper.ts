@@ -8,10 +8,11 @@ import { CliBridge, type EgoBridge } from './bridge.ts';
 import { HELPER_PROTOCOL, HelperBridge } from './helper-bridge.ts';
 import { isElevated } from './permissions.ts';
 export { isElevated } from './permissions.ts';
-const OPERATIONS = new Set(['connect', 'resume', 'control-status', 'tabs', 'handoff', 'finish', 'open', 'read', 'navigate', 'click', 'fill', 'press', 'scroll', 'evaluate', 'shot', 'close', 'video', 'bilibili']);
+const OPERATIONS = new Set(['connect', 'resume', 'control-status', 'tabs', 'handoff', 'finish', 'open', 'read', 'navigate', 'click', 'fill', 'press', 'scroll', 'evaluate', 'shot', 'close', 'video', 'bilibili', 'upload', 'download']);
 async function body(req: IncomingMessage): Promise<string> {
+  req.setEncoding('utf8');
   let result = '';
-  for await (const part of req) { result += part.toString('utf8'); if (Buffer.byteLength(result) > 128000) throw new Error('Request body exceeds 128 KB'); }
+  for await (const part of req) { result += part; if (Buffer.byteLength(result) > 128000) throw new Error('Request body exceeds 128 KB'); }
   return result;
 }
 export async function startHelper(options: { dir: string; cliFile?: string; timeoutMs?: number; bridge?: EgoBridge; checkElevated?: () => Promise<boolean> }) {

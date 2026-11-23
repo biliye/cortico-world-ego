@@ -13,9 +13,15 @@ export const searchPanel: WebUiPanel = {
     const list = ui.h('div');
     list.setAttribute('role', 'list');
     list.setAttribute('aria-label', t('搜索来源优先级', 'Search source priority'));
+    const invalid = ui.msgline(t(
+      '已保存的搜索设置无效，此处显示默认值。点击「保存搜索设置」会覆盖原设置。',
+      'The saved search settings are invalid. Defaults are shown here. Saving search settings will replace the invalid settings.',
+    ), true);
+    invalid.setAttribute('role', 'status');
+    invalid.hidden = true;
     const message = ui.msgline(t('正在读取搜索设置…', 'Loading search settings…'));
     message.setAttribute('role', 'status');
-    card.body.append(list, message);
+    card.body.append(invalid, list, message);
     ctx.root.append(card.el);
     let state: SearchPanelState;
     try { state = await ctx.invoke<SearchPanelState>('settings'); }
@@ -69,6 +75,7 @@ export const searchPanel: WebUiPanel = {
 
     function render(): void {
       if (ctx.signal.aborted) return;
+      invalid.hidden = !state.invalidSettings;
       list.replaceChildren();
       state.settings.sources.forEach((source, index) => {
         const name = sourceLabel(source) || 'MediaWiki';

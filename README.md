@@ -59,11 +59,13 @@ Ego 的设置依序显示「浏览器控制」「通用搜索」「配置」「E
 - `ego_search {"query":"不要停下来啊","mode":"meme"}` 按优先级查梗，默认先尝试萌娘百科，再尝试已填密钥的 Tavily、DeepSeek。可以加一句公开的 `context`，例如作品、角色或使用场景。回执含梗的用法和出处线索、来源链接，以及各搜索源的查询状态。出现歧义或只有零散用例时，会标为 `ambiguous` 或 `unverified`。
 - `ego_search {"query":"搜索关键词"}` 查普通网页，使用列表里的 Tavily、DeepSeek。传 `source` 可以按名称或 ID 指定单个来源，例如 `moegirl`。
 - 可添加公开的 MediaWiki HTTPS `api.php` 地址，或在 Tavily 配置查梗优先域名。Wiki 限制匿名全文搜索时，尝试其公开 OpenSearch 和条目页。未启用、缺密钥、无匹配或临时失败的来源会按顺序跳过。密钥单独保存，只显示配置状态。搜索请求从宿主发出，无需开启网页或使用浏览器登录态。
+- Ego 停用时也可以先保存来源和密钥，启用后就能调用。暂时停用某服务时，取消勾选该来源并保存。需要清除密钥时，从部署的 `.env` 或注入密钥的宿主环境移除对应的 `CORTICO_EGO_TAVILY_API_KEY` 或 `CORTICO_EGO_DEEPSEEK_API_KEY`，然后重启宿主。
 
 ## 浏览与视频
 
 | 工具 | 用途 |
 |---|---|
+| `ego_search` | 搜索公开网页，或查询梗的用法及出处线索 |
 | `ego_open` / `ego_navigate` / `ego_tabs` | 打开网址或 BV 号、导航已有页、列出本 Space 的页面 |
 | `ego_read` | 读取带操作引用的语义快照，支持 `fullPage`、`offset`、`maxChars` |
 | `ego_click` / `ego_fill` / `ego_press` / `ego_scroll` | 点击、填表、按键、滚动 |

@@ -146,6 +146,25 @@ describe('public search', () => {
 });
 
 describe('custom search settings', () => {
+  it('returns independent defaults and flags only invalid saved settings', () => {
+    const oldDeployment = new EgoSearch({ settings: () => undefined });
+    expect(oldDeployment.panelState()).toMatchObject({ invalidSettings: false, settings: clean() });
+
+    const invalid = clean();
+    invalid.preferredDomains = ['not a domain'];
+    const search = new EgoSearch({ settings: () => invalid });
+    const draft = search.panelState();
+    expect(draft).toMatchObject({ invalidSettings: true, settings: clean() });
+    draft.settings.sources.shift();
+    draft.settings.sources[0].enabled = false;
+    draft.settings.preferredDomains.push('example.org');
+    expect(search.panelState()).toMatchObject({
+      invalidSettings: true,
+      settings: { sources: [{ id: 'moegirl', enabled: true }, { id: 'tavily', enabled: true }, { id: 'deepseek', enabled: true }], preferredDomains: [] },
+    });
+    expect(invalid.preferredDomains).toEqual(['not a domain']);
+  });
+
   it('preserves order and canonicalizes preferred domains', () => {
     const settings = clean();
     settings.sources.reverse();

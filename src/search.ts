@@ -47,10 +47,17 @@ function row(value: unknown): Row {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Row : {};
 }
 
-function result(title: unknown, url: unknown, snippet: unknown): SearchResult | undefined {
+function parseSearchUrl(url: unknown): URL | undefined {
   if (typeof url !== 'string' || url.length > 512) return;
-  const parsed = URL.parse(url);
-  if (!parsed || !['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return;
+  try {
+    const parsed = new URL(url);
+    if (['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password) return parsed;
+  } catch { /* An invalid link is not a search result. */ }
+}
+
+function result(title: unknown, url: unknown, snippet: unknown): SearchResult | undefined {
+  const parsed = parseSearchUrl(url);
+  if (!parsed) return;
   const name = cleanText(title, 160);
   if (name) return { title: name, url: parsed.href, snippet: cleanText(snippet) };
 }
@@ -134,16 +141,22 @@ export class EgoSearch {
   }) {}
 
   panelState(): SearchPanelState {
-    let settings = DEFAULT_SEARCH_SETTINGS;
-    try { settings = this.settings(); } catch { /* A new save can replace invalid settings. */ }
+    let settings: SearchSettings;
+    let invalidSettings = false;
+    try { settings = this.settings(); }
+    catch {
+      settings = structuredClone(DEFAULT_SEARCH_SETTINGS);
+      invalidSettings = true;
+    }
     return {
-      settings,
+      settings, invalidSettings,
       configured: { tavily: Boolean(this.key('tavily')), deepseek: Boolean(this.key('deepseek')) },
     };
   }
 
   private settings(): SearchSettings {
-    return validateSearchSettings(this.options.settings() ?? DEFAULT_SEARCH_SETTINGS);
+    const saved = this.options.settings();
+    return validateSearchSettings(saved === undefined ? DEFAULT_SEARCH_SETTINGS : saved);
   }
 
   private key(provider: keyof typeof SEARCH_SECRETS): string | undefined {
@@ -216,7 +229,7 @@ export class EgoSearch {
     const origin = new URL(source.endpoint).origin;
     return matches.flatMap(hit => {
       const info = pages.find(page => page.pageid === hit.pageid);
-      const wikiPage = typeof info?.fullurl === 'string' ? URL.parse(info.fullurl) : null;
+      const wikiPage = parseSearchUrl(info?.fullurl);
       const fallback = new URL('index.php', source.endpoint);
       fallback.searchParams.set('curid', String(hit.pageid));
       const url = wikiPage?.origin === origin ? wikiPage.href : fallback.href;

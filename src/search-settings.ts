@@ -16,6 +16,7 @@ export interface SearchSettings {
 export interface SearchPanelState {
   settings: SearchSettings;
   configured: Record<WebSearchProvider, boolean>;
+  invalidSettings: boolean;
 }
 
 export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {

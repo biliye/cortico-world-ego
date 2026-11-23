@@ -40,9 +40,10 @@ export const requestSearch: SearchRequest = (url, { key, body, signal, response:
     // Resolve at connection time. The benchmark range is also used by local
     // DNS proxies, which still need to pass HTTPS certificate validation.
     lookup: (hostname, _options, callback) => {
-      lookup(hostname, { all: true, order: 'ipv4first' }, (error, addresses) => {
+      lookup(hostname, { all: true }, (error, addresses) => {
         if (error) return callback(error, '', 4);
-        const address = addresses.find(record => isAllowedSearchAddress(record.address));
+        const allowed = addresses.filter(record => isAllowedSearchAddress(record.address));
+        const address = allowed.find(record => record.family === 4) ?? allowed[0];
         if (!address) {
           const error = Object.assign(new Error('The search endpoint only resolved to blocked addresses.'), { code: 'EGO_SEARCH_ADDRESS_BLOCKED' });
           return callback(error, '', 4);

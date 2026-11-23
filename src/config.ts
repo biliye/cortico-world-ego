@@ -16,7 +16,7 @@ export const EGO_DEFAULTS: EgoConfigSection = {
   enabled: false, cliFile: 'ego-browser', spaceName: '', requestTimeoutMs: 45000, maxChars: 16000, restoreMinimized: true,
   connectionMode: 'auto', helperDir: '',
   video: { intervalMs: 15000, maxFrames: 4, frameWidth: 640, danmaku: true },
-  search: DEFAULT_SEARCH_SETTINGS,
+  search: structuredClone(DEFAULT_SEARCH_SETTINGS),
 };
 export function egoConfigGroup(language = 'zh'): ConfigGroup {
   const zh = language.startsWith('zh');

@@ -204,7 +204,6 @@ export class EgoWorld implements World {
   }
   private invokeSearchPanel(method: string, args: unknown[], zh: boolean) {
     if (method === 'settings') return this.search.panelState();
-    if (!this.running) throw new Error(zh ? '请先启用 World' : 'Enable the World first.');
     if (method === 'save') {
       if (!this.options.persistSearch) throw new Error(zh ? '宿主未提供配置保存接口。' : 'The host cannot save search settings.');
       const next = validateSearchSettings(args[0]);

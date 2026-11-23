@@ -1,6 +1,7 @@
 import type { WebUiClientBundle, WebUiPanelContext } from 'cortico/web/shared/client-panel.ts';
 import { panelView, type EgoPanelStatus } from './panel-model.ts';
-export default { panels: { control: { mount } } } satisfies WebUiClientBundle;
+import { searchPanel } from './search-panel.ts';
+export default { panels: { control: { mount }, search: searchPanel } } satisfies WebUiClientBundle;
 export function mount(ctx: WebUiPanelContext): void {
   const ui = ctx.ui, zh = ctx.language.startsWith('zh');
   const say = (cn: string, en: string) => zh ? cn : en;

@@ -9,7 +9,11 @@ export const EGO: WorldDefinition<EgoConfigSection> = {
     { value: 'helper', label: language.startsWith('zh') ? '普通权限助手（宿主可用管理员权限）' : 'Ordinary-permission helper (host can stay elevated)' },
     { value: 'direct', label: language.startsWith('zh') ? '直接连接（宿主须用普通权限）' : 'Direct (ordinary-permission host)' },
   ],
-  create: ctx => new EgoWorld({ cfg: ctx.cfg, timezone: ctx.timezone, dataDir: ctx.dataDir, botDir: ctx.botDir }),
+  create: ctx => new EgoWorld({
+    cfg: ctx.cfg, timezone: ctx.timezone, dataDir: ctx.dataDir, botDir: ctx.botDir,
+    secret: name => ctx.secret(name), storeSecret: (name, value) => ctx.storeSecret(name, value),
+    persistSearch: search => ctx.persist({ search }),
+  }),
   describe: {
     tools: describeTools(EGO_TOOL_DECLS, {
       ego_open: { zh: '在专用 Space 打开网页或 BV 视频。', en: 'Open a web page or Bilibili video in the dedicated Space.' },
@@ -29,6 +33,7 @@ export const EGO: WorldDefinition<EgoConfigSection> = {
       ego_handoff: { zh: '将 Space 交给操作员并停止操作。', en: 'Hand control to the operator and stop commands.' },
       ego_video: { zh: 'look 取当前画面；watch 按段采多帧合一图，读取字幕与 B 站弹幕文字。', en: 'look captures now; watch samples interval mosaics with subtitles and Bilibili danmaku text.' },
       ego_bilibili: { zh: '搜索 B 站视频、查看推荐与评论。', en: 'Search Bilibili, list related videos and comments.' },
+      ego_search: { zh: '搜索网页或查询梗的含义与出处。', en: 'Search the web or find evidence for a meme’s meaning and origin.' },
     }),
     events: [
       { type: 'ego.state', description: { zh: '连接、接管或恢复状态。', en: 'Connection, control handoff or resume state.' } },

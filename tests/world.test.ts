@@ -5,6 +5,7 @@ import { runInNewContext } from 'node:vm';
 import { videoOperation } from '../src/video-page.mjs';
 import { EgoWorld, normalizeUrl } from '../src/world.ts';
 import { EGO_DEFAULTS } from '../src/config.ts';
+import { SEARCH_SECRETS } from '../src/search-settings.ts';
 import { EGO } from '../src/definition.ts';
 import { MAX_FILE_BYTES } from '../src/file-transfer.mjs';
 import type { BridgeReceipt, EgoBridge } from '../src/bridge.ts';
@@ -46,6 +47,65 @@ beforeEach(async () => {
   blobs = () => null;
   world = new EgoWorld({ cfg, dataDir: dir, botDir: dir, timezone: 'Asia/Shanghai', bridge: browser });
   await world.start(host());
+});
+
+it('saves search settings and keys while inactive and searches without taking browser control', async () => {
+  await world.stop();
+  const secrets = new Map<string, string>();
+  const persistSearch = vi.fn((settings: NonNullable<typeof cfg.search>) => { cfg.search = settings; });
+  const request = vi.fn(async () => ({ results: [{ title: 'Result', url: 'https://example.org/result', content: 'Content' }] }));
+  world = new EgoWorld({
+    cfg, dataDir: dir, botDir: dir, timezone: 'Asia/Shanghai', bridge: browser, persistSearch, searchRequest: request,
+    secret: name => secrets.get(name), storeSecret: (name, value) => { secrets.set(name, value); },
+  });
+  const page = world.webUi();
+  expect(page.panels?.map(panel => panel.title)).toEqual(['浏览器控制', '通用搜索']);
+  expect(page.promptDocs?.map(doc => doc.title)).toEqual(['Ego · 环境提示词']);
+  expect(page.config?.map(group => group.id)).toEqual(['world:ego']);
+  expect(await call('search', { query: 'example' })).toMatchObject({ failed: true, text: 'Ego World is stopped.' });
+
+  const beforeSave = browser.calls.length;
+  const state = await page.invoke!('search', 'save-key', ['tavily', 'fixture-key']);
+  expect(JSON.stringify(state)).not.toContain('fixture-key');
+  expect(secrets.get(SEARCH_SECRETS.tavily)).toBe('fixture-key');
+  const pending = structuredClone(cfg.search!);
+  pending.preferredDomains = ['EXAMPLE.ORG'];
+  await page.invoke!('search', 'save', [pending]);
+  expect(persistSearch).toHaveBeenCalledWith(expect.objectContaining({ preferredDomains: ['example.org'] }));
+  expect(browser.calls).toHaveLength(beforeSave);
+
+  await world.start(host());
+  await call('handoff');
+  expect(world.status().halted).toBe(true);
+  const before = browser.calls.length;
+  const outcome = await call('search', { query: 'example' });
+  expect(JSON.parse(outcome.text)).toMatchObject({ status: 'available', source: 'Tavily' });
+  expect(request).toHaveBeenCalledOnce();
+  expect(browser.calls).toHaveLength(before);
+});
+
+it('rolls back search settings when persistence fails and rejects invalid key input', async () => {
+  await world.stop();
+  const original = structuredClone(cfg.search!);
+  const pending = structuredClone(original);
+  pending.sources[0].enabled = false;
+  const storeSecret = vi.fn();
+  world = new EgoWorld({
+    cfg, dataDir: dir, botDir: dir, timezone: 'Asia/Shanghai', bridge: browser, storeSecret,
+    persistSearch: settings => {
+      Object.assign(cfg.search!, settings);
+      throw new Error('Could not write config');
+    },
+  });
+  const invoke = world.webUi().invoke!;
+  await expect(invoke('search', 'save', [pending])).rejects.toThrow('Could not write config');
+  expect(await invoke('search', 'settings', [])).toMatchObject({ invalidSettings: false, settings: original });
+  expect(cfg.search).toEqual(original);
+
+  for (const [provider, value] of [['tavily', ''], ['tavily', 'bad key'], ['mediawiki', 'key'], ['deepseek', 'x'.repeat(513)]]) {
+    await expect(invoke('search', 'save-key', [provider, value])).rejects.toThrow('请填写有效的 API 密钥');
+  }
+  expect(storeSecret).not.toHaveBeenCalled();
 });
 
 it('keeps a selected workspace file readable for the later submit call', async () => {

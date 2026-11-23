@@ -1,4 +1,5 @@
 import type { ConfigGroup } from 'cortico/core/types.ts';
+import { DEFAULT_SEARCH_SETTINGS, type SearchSettings } from './search-settings.ts';
 export interface EgoConfigSection {
   enabled: boolean;
   cliFile: string;
@@ -9,11 +10,13 @@ export interface EgoConfigSection {
   connectionMode: 'auto' | 'direct' | 'helper';
   helperDir: string;
   video: { intervalMs: number; maxFrames: number; frameWidth: number; danmaku: boolean };
+  search?: SearchSettings;
 }
 export const EGO_DEFAULTS: EgoConfigSection = {
   enabled: false, cliFile: 'ego-browser', spaceName: '', requestTimeoutMs: 45000, maxChars: 16000, restoreMinimized: true,
   connectionMode: 'auto', helperDir: '',
   video: { intervalMs: 15000, maxFrames: 4, frameWidth: 640, danmaku: true },
+  search: structuredClone(DEFAULT_SEARCH_SETTINGS),
 };
 export function egoConfigGroup(language = 'zh'): ConfigGroup {
   const zh = language.startsWith('zh');

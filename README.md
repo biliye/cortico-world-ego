@@ -2,7 +2,7 @@
 
 <img src="assets/icon.webp" width="96" height="96" alt="Ego 浏览器图标">
 
-Ego 浏览器：专为 AI 打造的浏览器 World，让你家的小肥鱼上网、看图、看视频更顺手。让 Cortico 与 Coopanion（Coo）通过已安装的 [Ego Lite](https://github.com/citrolabs/ego-lite) 浏览网页、读取字幕和视频画面。World id 为 `ego`，契约为 world 6。
+Ego 浏览器：专为 AI 打造的浏览器 World，让你家的小肥鱼上网、查梗、看图和看视频。Cortico 与 Coopanion（Coo）可以通过已安装的 [Ego Lite](https://github.com/citrolabs/ego-lite) 浏览网页、读取字幕和视频画面，也可用通用搜索查网页和梗。World id 为 `ego`，契约为 world 6。
 
 需要本机 Ego Lite 与 `ego-browser` 2.1 API。直接连接时由宿主调用 CLI；管理员宿主通过独立的普通权限助手调用。助手需要系统可找到 Node.js 22 以上。无需 web-access、Chrome 调试端口或另一个浏览器实例。Windows/macOS 可用。
 
@@ -54,7 +54,7 @@ Ego 会在执行浏览器脚本之前拒绝管理员身份的 `ego-browser`，�
 
 ## 通用搜索
 
-Ego 的设置依序显示「浏览器控制」「通用搜索」「配置」「Ego · 环境提示词」。在「通用搜索」里勾选来源、拖动整行或用 ↑ ↓ 排序，保存后从下次调用生效。
+从 0.1.15 起，Ego 的设置依序显示「浏览器控制」「通用搜索」「配置」「Ego · 环境提示词」。在「通用搜索」里勾选来源、拖动整行或用 ↑ ↓ 排序，保存后从下次调用生效。
 
 - `ego_search {"query":"不要停下来啊","mode":"meme"}` 按优先级查梗，默认先尝试萌娘百科，再尝试已填密钥的 Tavily、DeepSeek。可以加一句公开的 `context`，例如作品、角色或使用场景。回执含梗的用法和出处线索、来源链接，以及各搜索源的查询状态。出现歧义或只有零散用例时，会标为 `ambiguous` 或 `unverified`。
 - `ego_search {"query":"搜索关键词"}` 查普通网页，使用列表里的 Tavily、DeepSeek。传 `source` 可以按名称或 ID 指定单个来源，例如 `moegirl`。

@@ -14,6 +14,9 @@ import { prepareHelperLauncher } from './helper-launcher.ts';
 import { isConnectionFailure, normalizeFailure } from './failures.ts';
 import { MAX_FILE_BYTES, safeFilename } from './file-transfer.mjs';
 import { captureOptions, samplingOverride, samplingPlan, samplingSummary, targetOffset, type SamplingOverride, type SamplingPlan } from './sampling.ts';
+import { EgoSearch } from './search.ts';
+import type { SearchRequest } from './search-http.ts';
+import { SEARCH_SECRETS, isWebSearchProvider, validateSearchSettings, type SearchSettings } from './search-settings.ts';
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 const UPLOAD_RETENTION_MS = 24 * 60 * 60 * 1000;
 const DOWNLOAD_EXTENSIONS: Readonly<Record<string, string>> = {
@@ -34,10 +37,15 @@ interface SavedState { spaceId?: number; halted: boolean; reason: string; code?:
 const UNKNOWN_EVALUATION_HINT = 'The timed-out script outcome remains unknown and it may still have late effects. Do not replay it automatically; inspect the current page and reconcile any submission before continuing. Video watching has not resumed.';
 export interface EgoWorldOptions {
   cfg: EgoConfigSection; timezone: string; dataDir: string; botDir: string; bridge?: EgoBridge;
+  secret?: (name: string) => string | undefined;
+  storeSecret?: (name: string, value: string) => void;
+  persistSearch?: (search: SearchSettings) => void;
+  searchRequest?: SearchRequest;
 }
 export class EgoWorld implements World {
   readonly id = 'ego';
   private readonly bridge: EgoBridge;
+  private readonly search: EgoSearch;
   private readonly spaceName: string;
   private readonly stateFile: string;
   private readonly helper: HelperBridge;
@@ -63,6 +71,7 @@ export class EgoWorld implements World {
   private generation = 0;
   private pendingScenes = new Set<{ page: string; outcome?: ToolOutcome }>();
   constructor(private readonly options: EgoWorldOptions) {
+    this.search = new EgoSearch({ settings: () => options.cfg.search, secret: options.secret, request: options.searchRequest });
     this.spaceName = options.cfg.spaceName || `Cortico-${createHash('sha256').update(options.botDir).digest('hex').slice(0, 12)}`;
     this.stateFile = join(options.dataDir, 'ego', 'space.json');
     const timeoutMs = () => bounded(options.cfg.requestTimeoutMs, 5000, 120000, 45000);
@@ -76,15 +85,29 @@ export class EgoWorld implements World {
   }
   envPromptVars(): Record<string, string> { return { 'ego.spaceName': this.spaceName }; }
   tools(): ToolDef[] {
-    return EGO_TOOL_DECLS.map(spec => ({ ...spec, handler: (args, ctx) => spec.name === 'ego_wait' ? this.wait(args, ctx.signal) : this.serial(async () => {
-      if (!this.running) return { text: 'Ego World is stopped.', failed: true };
-      const diagnostic = this.isEvaluationDiagnostic(spec.name.slice(4));
-      if (this.saved.halted && !diagnostic) return { text: `Ego paused: ${this.saved.reason}\n${this.canRecoverMissingSpace() && (this.recoveryTimer || this.recoveringSpace) ? 'Automatic Space recovery is pending. Keep Ego and its helper available; do not repeat browser operations.' : this.canCheckEvaluation() && (this.controlTimer || this.checkingControl) ? 'Automatic recovery is checking agent control and the timed-out page snapshot. No panel resume is needed when diagnosis succeeds. Do not replay the timed-out script.' : this.canCheckControl() && (this.controlTimer || this.checkingControl) ? 'Control is checked automatically. Return control in Ego when finished; the World panel is an alternative. Do not repeat browser operations.' : 'The operator must resume in the World panel.'}${this.canDiagnoseEvaluation() ? '\nego_tabs and ego_read are available for read-only diagnosis without resuming. Use ego_wait for simple delays; elapsed time alone does not clear this pause.' : ''}`, failed: true };
-      if (!this.connected && !diagnostic) return { text: `Ego is not connected: ${this.saved.reason || 'Reconnect from the World panel.'}`, failed: true };
-      ctx.signal?.throwIfAborted();
-      try { return await this.invokeTool(spec.name.slice(4), args, ctx.signal); }
-      catch (error) { return { text: error instanceof Error ? error.message : String(error), failed: true }; }
-    }) }));
+    return EGO_TOOL_DECLS.map(spec => {
+      if (spec.name === 'ego_search') return { ...spec, interruptible: true, handler: (args, ctx) => this.searchPublic(args, ctx.signal) };
+      if (spec.name === 'ego_wait') return { ...spec, handler: (args, ctx) => this.wait(args, ctx.signal) };
+      return { ...spec, handler: (args, ctx) => this.serial(async () => {
+        if (!this.running) return { text: 'Ego World is stopped.', failed: true };
+        const diagnostic = this.isEvaluationDiagnostic(spec.name.slice(4));
+        if (this.saved.halted && !diagnostic) return { text: `Ego paused: ${this.saved.reason}\n${this.canRecoverMissingSpace() && (this.recoveryTimer || this.recoveringSpace) ? 'Automatic Space recovery is pending. Keep Ego and its helper available; do not repeat browser operations.' : this.canCheckEvaluation() && (this.controlTimer || this.checkingControl) ? 'Automatic recovery is checking agent control and the timed-out page snapshot. No panel resume is needed when diagnosis succeeds. Do not replay the timed-out script.' : this.canCheckControl() && (this.controlTimer || this.checkingControl) ? 'Control is checked automatically. Return control in Ego when finished; the World panel is an alternative. Do not repeat browser operations.' : 'The operator must resume in the World panel.'}${this.canDiagnoseEvaluation() ? '\nego_tabs and ego_read are available for read-only diagnosis without resuming. Use ego_wait for simple delays; elapsed time alone does not clear this pause.' : ''}`, failed: true };
+        if (!this.connected && !diagnostic) return { text: `Ego is not connected: ${this.saved.reason || 'Reconnect from the World panel.'}`, failed: true };
+        ctx.signal?.throwIfAborted();
+        try { return await this.invokeTool(spec.name.slice(4), args, ctx.signal); }
+        catch (error) { return { text: error instanceof Error ? error.message : String(error), failed: true }; }
+      }) };
+    });
+  }
+  private async searchPublic(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome> {
+    try {
+      if (!this.running) throw new Error('Ego World is stopped.');
+      const combined = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
+      const result = await this.search.search(args, combined);
+      return { text: JSON.stringify(result), ...(result.status === 'unavailable' && { failed: true }) };
+    } catch (error) {
+      return { text: error instanceof Error ? error.message : String(error), failed: true };
+    }
   }
   private async wait(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome> {
     try {
@@ -120,10 +143,14 @@ export class EgoWorld implements World {
       label: zh ? 'Ego 浏览器' : 'Ego Browser',
       lamps: [{ label: 'Ego', state: !this.running ? 'offline' : this.saved.halted || this.saved.reason ? 'error' : this.connected ? 'online' : 'loading', hint: this.saved.reason || this.spaceName }],
       badges: [{ label: 'Space', value: this.saved.spaceId ?? '—' }, { label: zh ? '观看' : 'Watching', value: this.watch?.page ?? '—' }],
-      config: [egoConfigGroup(language)], panels: [{ id: 'control', title: zh ? '浏览器控制' : 'Browser control' }],
+      config: [egoConfigGroup(language)], panels: [
+        { id: 'control', title: zh ? '浏览器控制' : 'Browser control' },
+        { id: 'search', title: zh ? '通用搜索' : 'General search' },
+      ],
       promptDocs: [{ key: 'worlds.ego.envPrompt', title: zh ? 'Ego · 环境提示词' : 'Ego · Environment prompt', description: zh ? '浏览器使用时机与观看范围。' : 'Browser usage and video observation scope.', path: ENV_PROMPT_FILE,
         role: 'envPrompt', vars: [{ name: 'ego.spaceName', description: zh ? '本部署的 Space 名称' : 'This deployment’s Space name' }] }],
-      invoke: (panel, method) => {
+      invoke: async (panel, method, args) => {
+        if (panel === 'search') return this.invokeSearchPanel(method, args, zh);
         if (panel !== 'control') throw new Error('Unknown panel');
         if (method === 'status') return this.helper.probe().then(online => { this.helperOnline = online; return this.status(); });
         // Invalidate queued/in-flight probes before waiting for the serial command queue.
@@ -174,6 +201,33 @@ export class EgoWorld implements World {
         });
       },
     };
+  }
+  private invokeSearchPanel(method: string, args: unknown[], zh: boolean) {
+    if (method === 'settings') return this.search.panelState();
+    if (!this.running) throw new Error(zh ? '请先启用 World' : 'Enable the World first.');
+    if (method === 'save') {
+      if (!this.options.persistSearch) throw new Error(zh ? '宿主未提供配置保存接口。' : 'The host cannot save search settings.');
+      const next = validateSearchSettings(args[0]);
+      const previous = structuredClone(this.options.cfg.search);
+      try { this.options.persistSearch(next); }
+      catch (error) { this.options.cfg.search = previous; throw error; }
+      return this.search.panelState();
+    }
+    if (method === 'save-key') {
+      const [provider, input] = args;
+      const key = typeof input === 'string' ? input.trim() : '';
+      if (!isWebSearchProvider(provider) || !key || key.length > 512 || /\s/.test(key)) {
+        throw new Error(zh ? '请填写有效的 API 密钥。' : 'Enter a valid API key.');
+      }
+      try {
+        if (!this.options.storeSecret) throw new Error('No secret store.');
+        this.options.storeSecret(SEARCH_SECRETS[provider], key);
+      } catch {
+        throw new Error(zh ? 'API 密钥保存失败。' : 'Could not save the API key.');
+      }
+      return this.search.panelState();
+    }
+    throw new Error('Unknown search panel method.');
   }
   status() { return { running: this.running, connected: this.connected, ...this.saved, spaceName: this.spaceName, watching: this.watch?.page ?? null,
     autoRecovering: this.running && this.canRecoverMissingSpace() && (!!this.recoveryTimer || this.recoveringSpace),

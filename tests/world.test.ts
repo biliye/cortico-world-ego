@@ -5,6 +5,7 @@ import { runInNewContext } from 'node:vm';
 import { videoOperation } from '../src/video-page.mjs';
 import { EgoWorld, normalizeUrl } from '../src/world.ts';
 import { EGO_DEFAULTS } from '../src/config.ts';
+import { SEARCH_SECRETS } from '../src/search-settings.ts';
 import { EGO } from '../src/definition.ts';
 import { MAX_FILE_BYTES } from '../src/file-transfer.mjs';
 import type { BridgeReceipt, EgoBridge } from '../src/bridge.ts';
@@ -46,6 +47,39 @@ beforeEach(async () => {
   blobs = () => null;
   world = new EgoWorld({ cfg, dataDir: dir, botDir: dir, timezone: 'Asia/Shanghai', bridge: browser });
   await world.start(host());
+});
+
+it('exposes public search beside browser control and applies settings and keys without reconnecting', async () => {
+  await world.stop();
+  const secrets = new Map<string, string>();
+  const persistSearch = vi.fn((settings: NonNullable<typeof cfg.search>) => { cfg.search = settings; });
+  const request = vi.fn(async () => ({ results: [{ title: 'Result', url: 'https://example.org/result', content: 'Content' }] }));
+  world = new EgoWorld({
+    cfg, dataDir: dir, botDir: dir, timezone: 'Asia/Shanghai', bridge: browser, persistSearch, searchRequest: request,
+    secret: name => secrets.get(name), storeSecret: (name, value) => { secrets.set(name, value); },
+  });
+  await world.start(host());
+  const page = world.webUi();
+  expect(page.panels?.map(panel => panel.title)).toEqual(['浏览器控制', '通用搜索']);
+  expect(page.promptDocs?.map(doc => doc.title)).toEqual(['Ego · 环境提示词']);
+  expect(page.config?.map(group => group.id)).toEqual(['world:ego']);
+  expect(await call('search', { query: 'example' })).toMatchObject({ failed: true });
+
+  const state = await page.invoke!('search', 'save-key', ['tavily', 'fixture-key']);
+  expect(JSON.stringify(state)).not.toContain('fixture-key');
+  expect(secrets.get(SEARCH_SECRETS.tavily)).toBe('fixture-key');
+  const pending = structuredClone(cfg.search!);
+  pending.preferredDomains = ['EXAMPLE.ORG'];
+  await page.invoke!('search', 'save', [pending]);
+  expect(persistSearch).toHaveBeenCalledWith(expect.objectContaining({ preferredDomains: ['example.org'] }));
+
+  await call('handoff');
+  expect(world.status().halted).toBe(true);
+  const before = browser.calls.length;
+  const outcome = await call('search', { query: 'example' });
+  expect(JSON.parse(outcome.text)).toMatchObject({ status: 'available', source: 'Tavily' });
+  expect(request).toHaveBeenCalledOnce();
+  expect(browser.calls).toHaveLength(before);
 });
 
 it('keeps a selected workspace file readable for the later submit call', async () => {

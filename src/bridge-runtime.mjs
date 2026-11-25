@@ -14,6 +14,10 @@ function errorCode(error) {
 export async function execute({ operation, args }) {
   let task;
   try {
+    const checkPlayback = operation === 'tabs' && Array.isArray(args.playback);
+    if (checkPlayback && (!Number.isSafeInteger(args.spaceId) || args.spaceId <= 0)) {
+      throw new Error('Playback check requires an existing Space id.');
+    }
     if (operation === 'control-status') {
       // Observe the same existing Space. Never claim, take over, or create one.
       if (!Number.isSafeInteger(args.spaceId) || args.spaceId <= 0) throw new Error('Control check requires an existing Space id.');
@@ -36,7 +40,18 @@ export async function execute({ operation, args }) {
     }
     let value;
     if (operation === 'connect' || operation === 'resume') value = { name: task.name, pages: await inventory(task) };
-    else if (operation === 'tabs') value = await inventory(task);
+    else if (operation === 'tabs') {
+      const pages = await inventory(task);
+      if (checkPlayback) {
+        const labels = new Set(pages.map(page => page.page));
+        const playing = [];
+        for (const target of args.playback) {
+          const state = labels.has(target.page) && await runVideo(task, task.page(target.page), { ...target, action: 'playback-status' });
+          playing.push(state?.playing === true);
+        }
+        value = { playing };
+      } else value = pages;
+    }
     else if (operation === 'handoff') { await task.handOff(); value = { handedOff: true }; }
     else if (operation === 'finish') { value = await task.finish({ keep: [] }); }
     else if (operation === 'open') {
@@ -132,6 +147,7 @@ async function runVideo(task, page, args) {
     }
   }
   if (!state) {
+    if (args.action === 'playback-status') return { found: false, playing: false };
     if (args.frameId) throw new Error('Video frame no longer exists or contains no matching video. Inspect again without frameId.');
     return { found: false, message: 'No HTML5 video found in accessible frames. The player may still be loading or use a different media surface.' };
   }

@@ -4,7 +4,7 @@ import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { normalizeFailure } from './failures.ts';
+import { isLauncherAppNotFound, normalizeFailure } from './failures.ts';
 export interface EvaluationTimeout {
   page?: string; timeoutMs?: number; executionStopped?: boolean; pageResponsive?: boolean; mayHaveLateEffects?: boolean;
 }
@@ -51,13 +51,23 @@ export class CliBridge implements EgoBridge {
         if (signal?.aborted) abort();
         child.stderr?.on('data', (chunk) => { if (stderr.length < 8000) stderr += chunk.toString(); });
         child.on('error', (error) => finish(error));
-        child.on('close', (exitCode) => finish(exitCode === 0 ? undefined : new Error(`ego-browser exited ${exitCode}: ${stderr.trim()}`)));
+        child.on('close', (exitCode) => {
+          if (exitCode === 0) return finish();
+          const message = stderr.trim();
+          const error = new Error(`ego-browser exited ${exitCode}: ${message}`);
+          if (exitCode === 3 && isLauncherAppNotFound(message)) {
+            return finish(Object.assign(error, { code: 'EGO_APP_NOT_FOUND', uncertain: false }));
+          }
+          finish(error);
+        });
       });
       const receipt = JSON.parse(await readFile(output, 'utf8')) as BridgeReceipt;
       if (!receipt || typeof receipt !== 'object' || (!('value' in receipt) && !receipt.error)) throw new Error('Invalid Ego receipt');
       return receipt;
     } catch (error) {
-      return normalizeFailure({ error: error instanceof Error ? error.message : String(error), code: (error as { code?: string }).code === 'EGO_COMMAND_TIMEOUT' ? 'EGO_COMMAND_TIMEOUT' : undefined, uncertain: (error as { uncertain?: boolean }).uncertain ?? launched });
+      const { code, uncertain } = error as { code?: string; uncertain?: boolean };
+      return normalizeFailure({ error: error instanceof Error ? error.message : String(error),
+        code: code === 'EGO_COMMAND_TIMEOUT' || code === 'EGO_APP_NOT_FOUND' ? code : undefined, uncertain: uncertain ?? launched });
     } finally {
       await Promise.allSettled([unlink(input), unlink(output), unlink(screenshotFile)]);
     }

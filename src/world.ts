@@ -11,7 +11,7 @@ import { bounded, egoConfigGroup, type EgoConfigSection } from './config.ts';
 import { EGO_TOOL_DECLS } from './tools.ts';
 import { AutoBridge, HelperBridge } from './helper-bridge.ts';
 import { prepareHelperLauncher } from './helper-launcher.ts';
-import { isConnectionFailure, normalizeFailure } from './failures.ts';
+import { isConnectionFailure, normalizeFailure, normalizeSavedFailure } from './failures.ts';
 import { MAX_FILE_BYTES, safeFilename } from './file-transfer.mjs';
 import { captureOptions, samplingOverride, samplingPlan, samplingSummary, targetOffset, type SamplingOverride, type SamplingPlan } from './sampling.ts';
 import { EgoSearch } from './search.ts';
@@ -25,6 +25,9 @@ const DOWNLOAD_EXTENSIONS: Readonly<Record<string, string>> = {
   'application/pdf': '.pdf', 'application/zip': '.zip',
 };
 const STOP_CODES = /EGO_TASK_SPACE_(USER_IN_CONTROL|INACTIVE|NAME_IN_USE|NOT_FOUND|NOT_SELECTED|UNAVAILABLE)|EGO_TASK_HOST_DISCONNECTED/;
+const PLAYBACK_KEEPALIVE_MS = 10 * 60_000;
+const PLAYBACK_RETRY_MS = 60_000;
+interface PlaybackTarget { page: string; frameId?: string; selector?: string; index?: number }
 interface Watch {
   page: string; frameId?: string; selector?: string; index?: number; since: number; source?: string; generation: number;
   nextSampleAt: number; batch: number; targetIndex: number; lastTime: number; playbackRate: number;
@@ -60,6 +63,9 @@ export class EgoWorld implements World {
   private queue: Promise<unknown> = Promise.resolve();
   private lifetime = new AbortController();
   private timer?: ReturnType<typeof setTimeout>;
+  private readonly playing = new Map<string, PlaybackTarget>();
+  private playbackTimer?: ReturnType<typeof setTimeout>;
+  private playbackProbe?: AbortController;
   private recoveryTimer?: ReturnType<typeof setTimeout>;
   private recoveryDelay = 5000;
   private recoveringSpace = false;
@@ -154,7 +160,10 @@ export class EgoWorld implements World {
         if (panel !== 'control') throw new Error('Unknown panel');
         if (method === 'status') return this.helper.probe().then(online => { this.helperOnline = online; return this.status(); });
         // Invalidate queued/in-flight probes before waiting for the serial command queue.
-        if (method === 'stop-helper') { this.clearSpaceRecovery(); this.clearControlCheck(); }
+        if (method === 'stop-helper') {
+          this.clearSpaceRecovery(); this.clearControlCheck();
+          if (this.transport?.selected === 'helper') this.clearPlaybackKeepalive();
+        }
         return this.serial(async () => {
           if (!this.running) throw new Error(zh ? '请先启用 World' : 'Enable the World first');
           if (method === 'prepare-helper') {
@@ -163,6 +172,7 @@ export class EgoWorld implements World {
           } else if (method === 'stop-helper') {
             this.clearSpaceRecovery();
             this.clearControlCheck();
+            if (this.transport?.selected === 'helper') this.clearPlaybackKeepalive();
             await this.helper.stop(); this.helperOnline = false;
             if (this.transport?.selected === 'helper') {
               this.cancelWatch(); this.connected = false;
@@ -237,12 +247,13 @@ export class EgoWorld implements World {
   async start(host: WorldHost): Promise<void> {
     this.host = host; this.running = true; this.lifetime = new AbortController();
     try {
-      const saved = JSON.parse(await readFile(this.stateFile, 'utf8'));
+      const saved = JSON.parse((await readFile(this.stateFile, 'utf8')).replace(/^\uFEFF/, ''));
       if (saved.spaceName === this.spaceName) {
-        const previous = normalizeFailure({ error: String(saved.reason ?? ''), code: saved.code, uncertain: !!saved.halted });
-        this.saved = { spaceId: saved.spaceId, halted: isConnectionFailure(previous.code) ? false : !!saved.halted, reason: String(saved.reason ?? ''), code: previous.code,
+        const previous = normalizeSavedFailure({ error: String(saved.reason ?? ''), code: saved.code, uncertain: !!saved.halted });
+        const retryable = isConnectionFailure(previous.code);
+        this.saved = { spaceId: saved.spaceId, halted: !retryable && !!saved.halted, reason: String(saved.reason ?? ''), code: previous.code,
           spaceMissing: saved.spaceMissing === true && previous.code === 'EGO_TASK_SPACE_NOT_FOUND',
-          uncertain: saved.uncertain === true || (saved.uncertain !== false && previous.code === 'EGO_TASK_SPACE_USER_IN_CONTROL' && saved.reason !== 'Control was handed to the operator.'),
+          uncertain: !retryable && (saved.uncertain === true || (saved.uncertain !== false && previous.code === 'EGO_TASK_SPACE_USER_IN_CONTROL' && saved.reason !== 'Control was handed to the operator.')),
           observationTimeout: saved.observationTimeout === true && previous.code === 'EGO_COMMAND_TIMEOUT',
           evaluation: previous.code === 'EGO_PAGE_EVALUATION_TIMED_OUT' && saved.evaluation && typeof saved.evaluation === 'object' ? saved.evaluation : undefined,
           evaluationRecoveryBlocked: typeof saved.evaluationRecoveryBlocked === 'string' ? saved.evaluationRecoveryBlocked : undefined,
@@ -256,7 +267,7 @@ export class EgoWorld implements World {
     });
   }
   async stop(): Promise<void> {
-    const watch = this.watch; this.running = false; this.cancelWatch(); this.clearSpaceRecovery(); this.clearControlCheck(); this.lifetime.abort();
+    const watch = this.watch; this.running = false; this.cancelWatch(); this.clearPlaybackKeepalive(); this.clearSpaceRecovery(); this.clearControlCheck(); this.lifetime.abort();
     await this.queue.catch(() => {});
     // Do not touch a Space after user takeover or an uncertain command outcome.
     if (watch && !this.saved.halted && this.connected) {
@@ -271,6 +282,45 @@ export class EgoWorld implements World {
   private async save(): Promise<void> {
     await mkdir(join(this.options.dataDir, 'ego'), { recursive: true });
     await writeFile(this.stateFile, JSON.stringify({ ...this.saved, spaceName: this.spaceName }), { mode: 0o600 });
+  }
+  private clearPlaybackKeepalive(): void {
+    clearTimeout(this.playbackTimer);
+    this.playbackTimer = undefined;
+    this.playing.clear();
+    this.playbackProbe?.abort();
+  }
+  private schedulePlaybackKeepalive(delay = PLAYBACK_KEEPALIVE_MS): void {
+    clearTimeout(this.playbackTimer);
+    this.playbackTimer = undefined;
+    const spaceId = this.saved.spaceId;
+    if (!this.running || !this.connected || this.saved.halted || !this.playing.size || !spaceId) return;
+    const timer = setTimeout(() => {
+      void this.serial(async () => {
+        if (this.playbackTimer !== timer) return;
+        this.playbackTimer = undefined;
+        const probe = this.playbackProbe = new AbortController();
+        const entries = [...this.playing];
+        try {
+          const signal = AbortSignal.any([probe.signal, AbortSignal.timeout(15_000)]);
+          // Bypass command(): a background read cannot change control or rebuild a Space.
+          const receipt = normalizeFailure(await this.bridge.run('tabs', { spaceId, playback: entries.map(([, target]) => target) }, signal));
+          if (probe.signal.aborted) return;
+          if (STOP_CODES.test(receipt.code ?? '')) { this.clearPlaybackKeepalive(); return; }
+          if (receipt.error || receipt.code || receipt.uncertain) { this.schedulePlaybackKeepalive(PLAYBACK_RETRY_MS); return; }
+          const playing = receipt.value?.playing;
+          if (receipt.spaceId !== spaceId || !Array.isArray(playing) || playing.length !== entries.length) {
+            this.clearPlaybackKeepalive();
+            return;
+          }
+          entries.forEach(([key], index) => { if (playing[index] !== true) this.playing.delete(key); });
+          this.schedulePlaybackKeepalive();
+        } catch {
+          if (!probe.signal.aborted) this.schedulePlaybackKeepalive(PLAYBACK_RETRY_MS);
+        } finally { this.playbackProbe = undefined; }
+      });
+    }, delay);
+    this.playbackTimer = timer;
+    timer.unref?.();
   }
   private canCheckControl(): boolean {
     return this.saved.halted && Number.isSafeInteger(this.saved.spaceId) && this.saved.spaceId! > 0
@@ -401,9 +451,13 @@ export class EgoWorld implements World {
     const receipt: BridgeReceipt = normalizeFailure(await this.bridge.run(operation, { ...args, restoreMinimized: this.options.cfg.restoreMinimized, spaceId: byName ? undefined : this.saved.spaceId, spaceName: this.spaceName }, combined));
     // A failed diagnostic cannot erase, weaken or replace the original uncertain stop.
     if (diagnostic && (receipt.error || receipt.uncertain || receipt.spaceId !== this.saved.spaceId)) throw new Error(`Ego diagnostic failed: ${receipt.code ?? ''}: ${receipt.error ?? 'Uncertain or mismatched Space receipt'}. The original evaluation pause is unchanged.`);
-    if (receipt.spaceId && !receipt.error) { this.saved.spaceId = receipt.spaceId; await this.save(); }
+    if (receipt.spaceId && !receipt.error) {
+      if (receipt.spaceId !== this.saved.spaceId) this.clearPlaybackKeepalive();
+      this.saved.spaceId = receipt.spaceId; await this.save();
+    }
     if (receipt.error) {
       if (isConnectionFailure(receipt.code)) {
+        this.clearPlaybackKeepalive();
         if (operatorResume && this.saved.halted) {
           this.saved.reason = `${this.saved.reason.split('\n')[0]}\n${receipt.error}`; this.connected = false; await this.save();
           throw new Error(`${receipt.code}: ${receipt.error}`);
@@ -411,6 +465,7 @@ export class EgoWorld implements World {
         this.saved.halted = false; this.saved.reason = receipt.error; this.saved.code = receipt.code; this.cancelWatch(); this.connected = false;
         await this.save(); await this.event('state', `Ego connection unavailable: ${receipt.code}: ${receipt.error}`, true);
       } else if (receipt.uncertain || receipt.code === 'EGO_PAGE_EVALUATION_TIMED_OUT' || STOP_CODES.test(receipt.code ?? receipt.error)) {
+        this.clearPlaybackKeepalive();
         this.saved.halted = true; this.saved.reason = `${receipt.code ?? 'UNCERTAIN'}: ${receipt.error}`; this.saved.code = receipt.code ?? 'UNCERTAIN';
         this.saved.uncertain = receipt.uncertain === true || receipt.code === 'EGO_PAGE_EVALUATION_TIMED_OUT';
         this.saved.evaluation = receipt.code === 'EGO_PAGE_EVALUATION_TIMED_OUT' ? { ...receipt.evaluation, page: typeof args.page === 'string' ? args.page : receipt.evaluation?.page } : undefined;
@@ -432,10 +487,12 @@ export class EgoWorld implements World {
       throw new Error(`${receipt.code ? `${receipt.code}: ` : ''}${receipt.error}${this.canCheckEvaluation() ? '\nAutomatic recovery will check control and the timed-out page snapshot. Do not replay the script; successful diagnosis restores browser tools without a panel resume.' : ''}`);
     }
     if (this.transport?.selected === 'helper') this.helperOnline = true;
+    this.schedulePlaybackKeepalive();
     return receipt.value;
   }
   private async handoff(): Promise<ToolOutcome> {
     this.cancelWatch(); await this.command('handoff', {});
+    this.clearPlaybackKeepalive();
     this.saved.halted = true; this.saved.reason = 'Control was handed to the operator.'; this.saved.code = 'EGO_TASK_SPACE_USER_IN_CONTROL'; this.connected = false;
     this.saved.uncertain = false; this.saved.observationTimeout = false; this.clearControlCheck(); this.scheduleControlCheck();
     await this.save(); await this.event('state', this.saved.reason, true);
@@ -454,6 +511,10 @@ export class EgoWorld implements World {
     if (operation !== 'video') {
       const diagnostic = this.isEvaluationDiagnostic(operation);
       const value = await this.command(operation, args, signal);
+      if (operation === 'close' || operation === 'navigate') {
+        for (const [key, target] of this.playing) if (target.page === args.page) this.playing.delete(key);
+        this.schedulePlaybackKeepalive();
+      }
       const result = this.outcome(value, operation === 'read' ? Number(args.offset ?? 0) : 0, Number(args.maxChars ?? this.options.cfg.maxChars));
       if (operation === 'bilibili' && args.action === 'comments' && ['target-unavailable', 'error'].includes(value?.status)) result.failed = true;
       if (diagnostic) result.text += '\nRead-only diagnosis only. The page-evaluation pause remains; pending JavaScript may still produce late effects. Do not repeat the timed-out script. Background diagnosis restores operations only after control and page checks pass; reading alone does not clear this pause.';
@@ -481,6 +542,13 @@ export class EgoWorld implements World {
       snapshotOnly: action === 'look' && this.watch?.page === args.page };
     const value = await this.command('video', { ...videoArgs, resetFrames: action === 'watch' || action === 'exit', action: action === 'watch' ? 'play' : action === 'exit' ? 'pause' : action }, signal);
     if (!value.found) return { text: `offset=0\n${JSON.stringify(value)}`, ...(action === 'inspect' ? {} : { failed: true as const }) };
+    if (['play', 'pause', 'exit', 'watch'].includes(action)) {
+      const target: PlaybackTarget = { page: String(args.page), frameId: value.frameId, selector: args.selector as string | undefined, index: args.index as number | undefined };
+      const key = JSON.stringify([target.page, target.frameId, target.selector ?? target.index ?? 0]);
+      if (action === 'play' && this.running && this.connected && value.paused === false && value.ended === false) this.playing.set(key, target);
+      else this.playing.delete(key);
+      this.schedulePlaybackKeepalive();
+    }
     if (!['inspect', 'look'].includes(action)) await this.event('video.state', JSON.stringify({ page: args.page, action, time: value.time, paused: value.paused }), true);
     if (action !== 'watch') {
       if (action === 'look') value.observation = { phase: 'snapshot', watching: this.watch?.page === args.page,

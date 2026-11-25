@@ -1,5 +1,18 @@
 import type { BridgeReceipt } from './bridge.ts';
 
+export function isLauncherAppNotFound(stderr: string): boolean {
+  return /^Failed to start ego lite: cannot find the app for \S/i.test(stderr);
+}
+
+export function normalizeSavedFailure(receipt: BridgeReceipt): BridgeReceipt {
+  const prefix = 'UNCERTAIN: ego-browser exited 3: ';
+  const error = receipt.error ?? '';
+  if (receipt.code === 'UNCERTAIN' && error.startsWith(prefix) && isLauncherAppNotFound(error.slice(prefix.length))) {
+    return { ...receipt, code: 'EGO_APP_NOT_FOUND', uncertain: false };
+  }
+  return normalizeFailure(receipt);
+}
+
 /** Ego rejects an elevated client before executing the requested browser script. */
 export function normalizeFailure(receipt: BridgeReceipt): BridgeReceipt {
   // Stable transport/control codes take precedence over quoted text in diagnostics.
@@ -15,5 +28,5 @@ export function normalizeFailure(receipt: BridgeReceipt): BridgeReceipt {
   return receipt;
 }
 export function isConnectionFailure(code?: string): boolean {
-  return ['EGO_CLIENT_ELEVATED', 'EGO_CLI_NOT_FOUND', 'EGO_BROWSER_UNAVAILABLE', 'EGO_HELPER_UNAVAILABLE', 'EGO_HELPER_REQUIRED', 'EGO_HELPER_VERSION'].includes(code ?? '');
+  return ['EGO_CLIENT_ELEVATED', 'EGO_CLI_NOT_FOUND', 'EGO_APP_NOT_FOUND', 'EGO_BROWSER_UNAVAILABLE', 'EGO_HELPER_UNAVAILABLE', 'EGO_HELPER_REQUIRED', 'EGO_HELPER_VERSION'].includes(code ?? '');
 }

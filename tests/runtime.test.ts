@@ -61,6 +61,28 @@ it('returns stable control-stop codes to the World', async () => {
   const result = await execute({ operation: 'tabs', args: {} });
   expect(result.code).toBe('EGO_TASK_SPACE_USER_IN_CONTROL');
 });
+it('checks playback in the specified Space without capturing or touching player state', async () => {
+  const video = { tagName: 'VIDEO', paused: false, ended: false,
+    get textTracks() { throw new Error('The playback probe must not load tracks.'); } };
+  const select = vi.fn(async () => task);
+  vi.stubGlobal('taskSpace', select);
+  page.cdp = vi.fn(async (method: string, params: any) => {
+    if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'parent' } } };
+    if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
+    if (method !== 'Runtime.evaluate') throw new Error(`Unexpected CDP call: ${method}`);
+    const context = { document: { querySelectorAll: () => [video] } };
+    const value = await runInNewContext(params.expression, context);
+    expect(context).not.toHaveProperty('__corticoEgoVideo');
+    return { result: { value } };
+  });
+  const playback = [{ page: 'p1', frameId: 'parent' }, { page: 'p2' }];
+  expect((await execute({ operation: 'tabs', args: { playback, spaceName: 'dedicated-name' } })).error).toContain('existing Space id');
+  expect(select).not.toHaveBeenCalled();
+  expect(await execute({ operation: 'tabs', args: { playback, spaceId: 1 } })).toEqual({ spaceId: 1, value: { playing: [true, false] } });
+  expect(select).toHaveBeenLastCalledWith(1);
+  video.ended = true;
+  expect(await execute({ operation: 'tabs', args: { playback, spaceId: 1 } })).toEqual({ spaceId: 1, value: { playing: [false, false] } });
+});
 it('observes delegated control without selecting a page, claiming or taking over', async () => {
   const select = vi.fn(async () => task), takeover = vi.fn(), claim = vi.fn();
   vi.stubGlobal('taskSpace', select); vi.stubGlobal('takeOverTaskSpace', takeover); vi.stubGlobal('claimTaskSpace', claim);

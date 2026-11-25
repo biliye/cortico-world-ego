@@ -10,6 +10,7 @@ export async function videoOperation(args) {
   collect(document);
   const v = args.selector ? document.querySelector(args.selector) : videos[args.index ?? 0];
   if (!v || v.tagName !== 'VIDEO') return { found: false, count: videos.length };
+  if (args.action === 'playback-status') return { found: true, playing: !v.paused && !v.ended };
   let cache = globalThis.__corticoEgoVideo;
   if (!cache || cache.video !== v || cache.src !== v.currentSrc) {
     cache = globalThis.__corticoEgoVideo = { video: v, src: v.currentSrc, frames: [], lastTime: -1 };

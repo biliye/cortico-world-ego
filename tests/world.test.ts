@@ -811,19 +811,36 @@ describe('playback keepalive', () => {
     expect(await readFile(join(dir, 'ego', 'space.json'), 'utf8')).toBe(before);
   });
 
-  it('backs off and gives up after successive whole-round failures', async () => {
+  it.each(['background', 'foreground'])('retains playback through repeated whole-round failures and %s recovery', async recovery => {
     await call('video', { page: 'p1', action: 'play' });
     const error = { error: 'Helper unavailable', code: 'EGO_HELPER_UNAVAILABLE' };
-    for (const [index, delay] of [idleMs, 60_000, 120_000, 240_000].entries()) {
+    for (const [index, delay] of [idleMs, 60_000, 120_000, 240_000, 240_000].entries()) {
       await vi.advanceTimersByTimeAsync(delay - 1);
       expect(probes()).toHaveLength(index);
       browser.next = error;
       await vi.advanceTimersByTimeAsync(1);
       expect(probes()).toHaveLength(index + 1);
     }
-    await vi.advanceTimersByTimeAsync(idleMs * 3);
-    expect(probes()).toHaveLength(4);
+    if (recovery === 'foreground') {
+      expect((await call('tabs')).failed).toBeUndefined();
+      expect((await call('video', { page: 'p1', action: 'inspect' })).failed).toBeUndefined();
+    }
+    const recoveryDelay = recovery === 'foreground' ? idleMs : 240_000;
+    await vi.advanceTimersByTimeAsync(recoveryDelay - 1);
+    expect(probes()).toHaveLength(5);
+    browser.next = { spaceId: 1, value: { playing: [true] } };
+    await vi.advanceTimersByTimeAsync(1);
+    expect(probes()).toHaveLength(6);
+    expect(probes().at(-1)?.args).toMatchObject({ spaceId: 1, playback: [{ page: 'p1' }] });
     expect(world.status()).toMatchObject({ spaceId: 1, connected: true, halted: false });
+
+    browser.next = error;
+    await vi.advanceTimersByTimeAsync(idleMs);
+    browser.next = { spaceId: 1, value: { playing: [false] } };
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(probes()).toHaveLength(8);
+    await vi.advanceTimersByTimeAsync(idleMs * 2);
+    expect(probes()).toHaveLength(8);
   });
 
   it('drops a persistently failed target and keeps checking the other playback', async () => {

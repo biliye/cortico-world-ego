@@ -66,6 +66,7 @@ export class EgoWorld implements World {
   private readonly playing = new Map<string, { target: PlaybackTarget; failures: number }>();
   private playbackTimer?: ReturnType<typeof setTimeout>;
   private playbackProbe?: AbortController;
+  private playbackRoundRetry = 0;
   private recoveryTimer?: ReturnType<typeof setTimeout>;
   private recoveryDelay = 5000;
   private recoveringSpace = false;
@@ -288,6 +289,7 @@ export class EgoWorld implements World {
     this.playbackTimer = undefined;
     this.playing.clear();
     this.playbackProbe?.abort();
+    this.playbackRoundRetry = 0;
   }
   private schedulePlaybackKeepalive(delay = PLAYBACK_KEEPALIVE_MS): void {
     clearTimeout(this.playbackTimer);
@@ -318,13 +320,20 @@ export class EgoWorld implements World {
             }
           }
         } catch {
-          // A failed round counts as a failed check for each target.
+          // A failed round leaves playback status unknown for every target.
         } finally { this.playbackProbe = undefined; }
         if (probe.signal.aborted) return;
 
+        if (!playing) {
+          const retryDelay = PLAYBACK_RETRY_DELAYS_MS[this.playbackRoundRetry];
+          this.playbackRoundRetry = Math.min(this.playbackRoundRetry + 1, PLAYBACK_RETRY_DELAYS_MS.length - 1);
+          this.schedulePlaybackKeepalive(retryDelay);
+          return;
+        }
+        this.playbackRoundRetry = 0;
         let nextDelay = PLAYBACK_KEEPALIVE_MS;
         for (const [index, [key, item]] of entries.entries()) {
-          const state = playing?.[index];
+          const state = playing[index];
           if (state === true) { item.failures = 0; continue; }
           const retryDelay = state === false ? undefined : PLAYBACK_RETRY_DELAYS_MS[item.failures++];
           if (retryDelay === undefined) this.playing.delete(key);
@@ -501,6 +510,7 @@ export class EgoWorld implements World {
       throw new Error(`${receipt.code ? `${receipt.code}: ` : ''}${receipt.error}${this.canCheckEvaluation() ? '\nAutomatic recovery will check control and the timed-out page snapshot. Do not replay the script; successful diagnosis restores browser tools without a panel resume.' : ''}`);
     }
     if (this.transport?.selected === 'helper') this.helperOnline = true;
+    this.playbackRoundRetry = 0;
     this.schedulePlaybackKeepalive();
     return receipt.value;
   }

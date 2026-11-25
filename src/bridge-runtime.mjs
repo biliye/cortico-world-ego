@@ -5,6 +5,8 @@ import { bilibiliComments } from './bilibili-comments.mjs';
 import { downloadFile, uploadFile } from './file-transfer.mjs';
 import { readFile } from 'node:fs/promises';
 
+const PLAYBACK_IFRAME_BUDGET_MS = 2000;
+
 function errorCode(error) {
   for (let e = error, i = 0; e && i < 5; e = e.cause, i++) {
     if (e.error_code || e.code) return e.error_code || e.code;
@@ -50,7 +52,7 @@ export async function execute({ operation, args }) {
             const state = labels.has(target.page) && await runVideo(task, task.page(target.page), { ...target, action: 'playback-status' });
             playing.push(state?.playing === true);
           } catch (error) {
-            if (String(errorCode(error) ?? '').startsWith('EGO_TASK_') || /^task space not found:\s*\d+\s*$/i.test(error.message)) throw error;
+            if (/^EGO_TASK_(SPACE_|HOST_)/.test(errorCode(error) ?? '') || /^task space not found:\s*\d+\s*$/i.test(error.message)) throw error;
             playing.push(null);
           }
         }
@@ -140,12 +142,14 @@ async function runVideo(task, page, args) {
     for (let pass = 0; pass <= targetInfos.length; pass++) {
       for (const target of targetInfos) if (owned.has(target.parentId) && !owned.has(target.targetId)) { owned.add(target.targetId); descendants.push(target); }
     }
+    // Leave time for the other players before the background round deadline.
+    const iframeDeadline = args.action === 'playback-status' ? Date.now() + PLAYBACK_IFRAME_BUDGET_MS : Infinity;
     for (const target of descendants) {
       const { sessionId } = await page.cdp('Target.attachToTarget', { targetId: target.targetId, flatten: false });
       let canDetach = true;
-      try { state = await scanVideo((method, params) => childCdp(page, sessionId, method, params), args); }
+      try { state = await scanVideo((method, params) => childCdp(page, sessionId, method, params, iframeDeadline), args); }
       catch (error) {
-        if (errorCode(error)?.startsWith('EGO_TASK_') || error.mayHaveLateEffects) canDetach = false;
+        if (String(errorCode(error) ?? '').startsWith('EGO_TASK_') || error.mayHaveLateEffects) canDetach = false;
         throw error;
       } finally { if (canDetach) await page.cdp('Target.detachFromTarget', { sessionId }); }
       if (state) break;
@@ -174,19 +178,23 @@ async function runVideo(task, page, args) {
   return state;
 }
 let childMessageId = 1;
-async function childCdp(page, sessionId, method, params) {
-  const id = childMessageId++;
-  await page.cdp('Target.sendMessageToTarget', { sessionId, message: JSON.stringify({ id, method, params }) });
-  const deadline = Date.now() + 12000;
-  while (Date.now() < deadline) {
-    for (const event of await page.events()) {
-      if (event.method !== 'Target.receivedMessageFromTarget' || event.params?.sessionId !== sessionId) continue;
-      const message = JSON.parse(event.params.message);
-      if (message.id !== id) continue;
-      if (message.error) throw new Error(message.error.message);
-      return message.result;
+async function childCdp(page, sessionId, method, params, iframeDeadline) {
+  const remaining = iframeDeadline - Date.now();
+  if (remaining > 0) {
+    const id = childMessageId++;
+    const options = Number.isFinite(remaining) ? { timeout: remaining } : undefined;
+    await page.cdp('Target.sendMessageToTarget', { sessionId, message: JSON.stringify({ id, method, params }) }, options);
+    const deadline = Math.min(Date.now() + 12000, iframeDeadline);
+    while (Date.now() < deadline) {
+      for (const event of await page.events()) {
+        if (event.method !== 'Target.receivedMessageFromTarget' || event.params?.sessionId !== sessionId) continue;
+        const message = JSON.parse(event.params.message);
+        if (message.id !== id) continue;
+        if (message.error) throw new Error(message.error.message);
+        return message.result;
+      }
+      await new Promise(resolve => setTimeout(resolve, 20));
     }
-    await new Promise(resolve => setTimeout(resolve, 20));
   }
   throw Object.assign(new Error(`Iframe CDP ${method} timed out; it may have late effects.`), { mayHaveLateEffects: true });
 }

@@ -780,7 +780,7 @@ describe('playback keepalive', () => {
     expect(probes()).toHaveLength(0);
   });
 
-  it.each(['EGO_TASK_SPACE_NOT_FOUND', 'EGO_TASK_SPACE_USER_IN_CONTROL'])('stops probing after %s and leaves foreground recovery intact', async code => {
+  it.each(['EGO_TASK_SPACE_NOT_FOUND', 'EGO_TASK_SPACE_USER_IN_CONTROL', 'EGO_APP_NOT_FOUND'])('stops probing after %s and leaves foreground recovery intact', async code => {
     await call('video', { page: 'p1', action: 'play' });
     browser.next = { error: 'Space unavailable for the probe.', code };
     const callsBeforeProbe = browser.calls.length;

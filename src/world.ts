@@ -26,7 +26,7 @@ const DOWNLOAD_EXTENSIONS: Readonly<Record<string, string>> = {
 };
 const STOP_CODES = /EGO_TASK_SPACE_(USER_IN_CONTROL|INACTIVE|NAME_IN_USE|NOT_FOUND|NOT_SELECTED|UNAVAILABLE)|EGO_TASK_HOST_DISCONNECTED/;
 const PLAYBACK_KEEPALIVE_MS = 10 * 60_000;
-const PLAYBACK_RETRY_MS = 60_000;
+const PLAYBACK_RETRY_DELAYS_MS = [60_000, 120_000, 240_000];
 interface PlaybackTarget { page: string; frameId?: string; selector?: string; index?: number }
 interface Watch {
   page: string; frameId?: string; selector?: string; index?: number; since: number; source?: string; generation: number;
@@ -63,7 +63,7 @@ export class EgoWorld implements World {
   private queue: Promise<unknown> = Promise.resolve();
   private lifetime = new AbortController();
   private timer?: ReturnType<typeof setTimeout>;
-  private readonly playing = new Map<string, PlaybackTarget>();
+  private readonly playing = new Map<string, { target: PlaybackTarget; failures: number }>();
   private playbackTimer?: ReturnType<typeof setTimeout>;
   private playbackProbe?: AbortController;
   private recoveryTimer?: ReturnType<typeof setTimeout>;
@@ -300,23 +300,37 @@ export class EgoWorld implements World {
         this.playbackTimer = undefined;
         const probe = this.playbackProbe = new AbortController();
         const entries = [...this.playing];
+        let playing: (boolean | null)[] | undefined;
         try {
           const signal = AbortSignal.any([probe.signal, AbortSignal.timeout(15_000)]);
           // Bypass command(): a background read cannot change control or rebuild a Space.
-          const receipt = normalizeFailure(await this.bridge.run('tabs', { spaceId, playback: entries.map(([, target]) => target) }, signal));
+          const receipt = normalizeFailure(await this.bridge.run('tabs', { spaceId, playback: entries.map(([, item]) => item.target) }, signal));
           if (probe.signal.aborted) return;
-          if (STOP_CODES.test(receipt.code ?? '')) { this.clearPlaybackKeepalive(); return; }
-          if (receipt.error || receipt.code || receipt.uncertain) { this.schedulePlaybackKeepalive(PLAYBACK_RETRY_MS); return; }
-          const playing = receipt.value?.playing;
-          if (receipt.spaceId !== spaceId || !Array.isArray(playing) || playing.length !== entries.length) {
+          if (STOP_CODES.test(receipt.code ?? receipt.error ?? '') || receipt.code === 'EGO_APP_NOT_FOUND') {
             this.clearPlaybackKeepalive();
             return;
           }
-          entries.forEach(([key], index) => { if (playing[index] !== true) this.playing.delete(key); });
-          this.schedulePlaybackKeepalive();
+          if (!receipt.error && !receipt.code && !receipt.uncertain) {
+            playing = receipt.value?.playing;
+            if (receipt.spaceId !== spaceId || !Array.isArray(playing) || playing.length !== entries.length) {
+              this.clearPlaybackKeepalive();
+              return;
+            }
+          }
         } catch {
-          if (!probe.signal.aborted) this.schedulePlaybackKeepalive(PLAYBACK_RETRY_MS);
+          // A failed round counts as a failed check for each target.
         } finally { this.playbackProbe = undefined; }
+        if (probe.signal.aborted) return;
+
+        let nextDelay = PLAYBACK_KEEPALIVE_MS;
+        for (const [index, [key, item]] of entries.entries()) {
+          const state = playing?.[index];
+          if (state === true) { item.failures = 0; continue; }
+          const retryDelay = state === false ? undefined : PLAYBACK_RETRY_DELAYS_MS[item.failures++];
+          if (retryDelay === undefined) this.playing.delete(key);
+          else nextDelay = Math.min(nextDelay, retryDelay);
+        }
+        this.schedulePlaybackKeepalive(nextDelay);
       });
     }, delay);
     this.playbackTimer = timer;
@@ -512,7 +526,7 @@ export class EgoWorld implements World {
       const diagnostic = this.isEvaluationDiagnostic(operation);
       const value = await this.command(operation, args, signal);
       if (operation === 'close' || operation === 'navigate') {
-        for (const [key, target] of this.playing) if (target.page === args.page) this.playing.delete(key);
+        for (const [key, { target }] of this.playing) if (target.page === args.page) this.playing.delete(key);
         this.schedulePlaybackKeepalive();
       }
       const result = this.outcome(value, operation === 'read' ? Number(args.offset ?? 0) : 0, Number(args.maxChars ?? this.options.cfg.maxChars));
@@ -545,7 +559,7 @@ export class EgoWorld implements World {
     if (['play', 'pause', 'exit', 'watch'].includes(action)) {
       const target: PlaybackTarget = { page: String(args.page), frameId: value.frameId, selector: args.selector as string | undefined, index: args.index as number | undefined };
       const key = JSON.stringify([target.page, target.frameId, target.selector ?? target.index ?? 0]);
-      if (action === 'play' && this.running && this.connected && value.paused === false && value.ended === false) this.playing.set(key, target);
+      if (action === 'play' && this.running && this.connected && value.paused === false && value.ended === false) this.playing.set(key, { target, failures: 0 });
       else this.playing.delete(key);
       this.schedulePlaybackKeepalive();
     }

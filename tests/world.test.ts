@@ -689,6 +689,14 @@ describe('control boundaries', () => {
     expect(world.status()).toMatchObject({ halted: false, connected: true, uncertain: false });
     expect(JSON.parse(await readFile(stateFile, 'utf8'))).toMatchObject({ halted: false, uncertain: false });
   });
+  it('migrates a legacy launcher failure with an extra diagnostic and no saved code', async () => {
+    await world.stop();
+    await writeFile(join(dir, 'ego', 'space.json'), JSON.stringify({ spaceName: world.status().spaceName, spaceId: 1, halted: true,
+      reason: 'ego-browser exited 3: Launcher diagnostic\nFailed to start ego lite: cannot find the app for launcher.exe.' }));
+    await world.start(host());
+    expect(browser.calls.at(-1)).toMatchObject({ op: 'connect', args: { spaceId: 1 } });
+    expect(world.status()).toMatchObject({ halted: false, connected: true, uncertain: false });
+  });
   it('allows retry after an app launch failure without bypassing other uncertain stops', async () => {
     const error = 'ego-browser exited 3: Failed to start ego lite: cannot find the app for launcher.exe.';
     await world.stop();
@@ -783,6 +791,14 @@ describe('playback keepalive', () => {
     expect((await call('tabs')).failed).toBeUndefined();
   });
 
+  it('stops probing when the Space failure only appears in the error text', async () => {
+    await call('video', { page: 'p1', action: 'play' });
+    browser.next = { error: 'EGO_TASK_SPACE_NOT_FOUND: task space not found: 1', uncertain: true };
+    await vi.advanceTimersByTimeAsync(idleMs * 3);
+    expect(probes()).toHaveLength(1);
+    expect(world.status()).toMatchObject({ spaceId: 1, connected: true, halted: false });
+  });
+
   it('retries transient probe failures without creating a pause or modifying saved state', async () => {
     await call('video', { page: 'p1', action: 'play' });
     const before = await readFile(join(dir, 'ego', 'space.json'), 'utf8');
@@ -793,6 +809,36 @@ describe('playback keepalive', () => {
     expect(probes()).toHaveLength(2);
     expect(world.status()).toMatchObject({ halted: false, connected: true });
     expect(await readFile(join(dir, 'ego', 'space.json'), 'utf8')).toBe(before);
+  });
+
+  it('backs off and gives up after successive whole-round failures', async () => {
+    await call('video', { page: 'p1', action: 'play' });
+    const error = { error: 'Helper unavailable', code: 'EGO_HELPER_UNAVAILABLE' };
+    for (const [index, delay] of [idleMs, 60_000, 120_000, 240_000].entries()) {
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(probes()).toHaveLength(index);
+      browser.next = error;
+      await vi.advanceTimersByTimeAsync(1);
+      expect(probes()).toHaveLength(index + 1);
+    }
+    await vi.advanceTimersByTimeAsync(idleMs * 3);
+    expect(probes()).toHaveLength(4);
+    expect(world.status()).toMatchObject({ spaceId: 1, connected: true, halted: false });
+  });
+
+  it('drops a persistently failed target and keeps checking the other playback', async () => {
+    await call('video', { page: 'p1', action: 'play' });
+    await call('video', { page: 'p2', action: 'play' });
+    for (const delay of [idleMs, 60_000, 120_000, 240_000]) {
+      browser.next = { spaceId: 1, value: { playing: [null, true] } };
+      await vi.advanceTimersByTimeAsync(delay);
+    }
+    expect(probes()).toHaveLength(4);
+    await vi.advanceTimersByTimeAsync(idleMs - 1);
+    expect(probes()).toHaveLength(4);
+    browser.next = { spaceId: 1, value: { playing: [true] } };
+    await vi.advanceTimersByTimeAsync(1);
+    expect(probes()[4].args.playback).toMatchObject([{ page: 'p2' }]);
   });
 });
 

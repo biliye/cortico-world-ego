@@ -1,13 +1,12 @@
 import type { BridgeReceipt } from './bridge.ts';
 
 export function isLauncherAppNotFound(stderr: string): boolean {
-  return /^Failed to start ego lite: cannot find the app for \S/i.test(stderr);
+  return /^[ \t]*Failed to start ego lite: cannot find the app for \S/im.test(stderr);
 }
 
 export function normalizeSavedFailure(receipt: BridgeReceipt): BridgeReceipt {
-  const prefix = 'UNCERTAIN: ego-browser exited 3: ';
-  const error = receipt.error ?? '';
-  if (receipt.code === 'UNCERTAIN' && error.startsWith(prefix) && isLauncherAppNotFound(error.slice(prefix.length))) {
+  const launcherError = /^(?:UNCERTAIN:\s*)?ego-browser exited 3:[ \t]*([\s\S]*)$/i.exec(receipt.error ?? '');
+  if (receipt.uncertain && (!receipt.code || receipt.code === 'UNCERTAIN') && launcherError && isLauncherAppNotFound(launcherError[1])) {
     return { ...receipt, code: 'EGO_APP_NOT_FOUND', uncertain: false };
   }
   return normalizeFailure(receipt);

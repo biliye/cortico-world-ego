@@ -83,6 +83,23 @@ it('checks playback in the specified Space without capturing or touching player 
   video.ended = true;
   expect(await execute({ operation: 'tabs', args: { playback, spaceId: 1 } })).toEqual({ spaceId: 1, value: { playing: [false, false] } });
 });
+it('isolates a failed playback target but still reports loss of control for the Space', async () => {
+  const controlError = Object.assign(new Error('user took control'), { code: 'EGO_TASK_SPACE_USER_IN_CONTROL' });
+  const failingPage = { cdp: vi.fn().mockRejectedValue(Object.assign(new Error('Frame unavailable'), { code: -32000 })) };
+  task.tabs = async () => [{ label: 'p1' }, { label: 'p2' }];
+  task.page = (label: string) => label === 'p1' ? failingPage : page;
+  page.cdp = vi.fn(async (method: string) => {
+    if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'parent' } } };
+    if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
+    return { result: { value: { found: true, playing: true } } };
+  });
+  const args = { spaceId: 1, playback: [{ page: 'p1' }, { page: 'p2' }] };
+  expect(await execute({ operation: 'tabs', args })).toEqual({ spaceId: 1, value: { playing: [null, true] } });
+  failingPage.cdp.mockRejectedValueOnce(controlError);
+  page.cdp.mockClear();
+  expect(await execute({ operation: 'tabs', args })).toMatchObject({ code: 'EGO_TASK_SPACE_USER_IN_CONTROL' });
+  expect(page.cdp).not.toHaveBeenCalled();
+});
 it('observes delegated control without selecting a page, claiming or taking over', async () => {
   const select = vi.fn(async () => task), takeover = vi.fn(), claim = vi.fn();
   vi.stubGlobal('taskSpace', select); vi.stubGlobal('takeOverTaskSpace', takeover); vi.stubGlobal('claimTaskSpace', claim);

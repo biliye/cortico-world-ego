@@ -46,8 +46,13 @@ export async function execute({ operation, args }) {
         const labels = new Set(pages.map(page => page.page));
         const playing = [];
         for (const target of args.playback) {
-          const state = labels.has(target.page) && await runVideo(task, task.page(target.page), { ...target, action: 'playback-status' });
-          playing.push(state?.playing === true);
+          try {
+            const state = labels.has(target.page) && await runVideo(task, task.page(target.page), { ...target, action: 'playback-status' });
+            playing.push(state?.playing === true);
+          } catch (error) {
+            if (String(errorCode(error) ?? '').startsWith('EGO_TASK_') || /^task space not found:\s*\d+\s*$/i.test(error.message)) throw error;
+            playing.push(null);
+          }
         }
         value = { playing };
       } else value = pages;

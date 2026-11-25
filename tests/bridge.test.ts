@@ -30,6 +30,7 @@ it('keeps a missing executable classified as a pre-execution setup failure', asy
 });
 it.each([
   [3, 'Failed to start ego lite: cannot find the app for launcher.exe.', 'EGO_APP_NOT_FOUND', false],
+  [3, 'Launcher diagnostic\r\n  Failed to start ego lite: cannot find the app for launcher.exe.', 'EGO_APP_NOT_FOUND', false],
   [3, 'Browser command terminated without a result.', undefined, true],
   [1, 'Failed to start ego lite: cannot find the app for launcher.exe.', undefined, true],
 ])('classifies launcher exit %s with stderr %s', async (exitCode, message, code, uncertain) => {

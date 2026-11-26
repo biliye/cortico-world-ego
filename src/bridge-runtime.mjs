@@ -13,6 +13,9 @@ function errorCode(error) {
   }
   return String(error).match(/EGO_[A-Z_]+/)?.[0];
 }
+function isPlaybackSpaceFailure(error) {
+  return /^EGO_TASK_(SPACE_|HOST_)/.test(errorCode(error) ?? '') || /^task space not found:\s*\d+\s*$/i.test(error.message);
+}
 export async function execute({ operation, args }) {
   let task;
   try {
@@ -52,7 +55,7 @@ export async function execute({ operation, args }) {
             const state = labels.has(target.page) && await runVideo(task, task.page(target.page), { ...target, action: 'playback-status' });
             playing.push(state?.playing === true);
           } catch (error) {
-            if (/^EGO_TASK_(SPACE_|HOST_)/.test(errorCode(error) ?? '') || /^task space not found:\s*\d+\s*$/i.test(error.message)) throw error;
+            if (isPlaybackSpaceFailure(error)) throw error;
             playing.push(null);
           }
         }
@@ -131,6 +134,7 @@ async function capturePage(task, page, args) {
   return { image: { base64: (await readFile(args.screenshotFile)).toString('base64'), mime: 'image/png' }, restoredWindow };
 }
 async function runVideo(task, page, args) {
+  const checkingPlayback = args.action === 'playback-status';
   const cdp = (method, params) => page.cdp(method, params);
   let state = await scanVideo(cdp, args);
   if (!state) {
@@ -142,21 +146,39 @@ async function runVideo(task, page, args) {
     for (let pass = 0; pass <= targetInfos.length; pass++) {
       for (const target of targetInfos) if (owned.has(target.parentId) && !owned.has(target.targetId)) { owned.add(target.targetId); descendants.push(target); }
     }
-    // Leave time for the other players before the background round deadline.
-    const iframeDeadline = args.action === 'playback-status' ? Date.now() + PLAYBACK_IFRAME_BUDGET_MS : Infinity;
+    // A previously located OOPIF can usually be addressed by its frame id.
+    if (checkingPlayback && args.frameId) {
+      descendants.sort((first, second) => Number(second.targetId === args.frameId) - Number(first.targetId === args.frameId));
+    }
+    let uncheckedFrameError;
     for (const target of descendants) {
-      const { sessionId } = await page.cdp('Target.attachToTarget', { targetId: target.targetId, flatten: false });
+      let sessionId;
       let canDetach = true;
-      try { state = await scanVideo((method, params) => childCdp(page, sessionId, method, params, iframeDeadline), args); }
-      catch (error) {
-        if (String(errorCode(error) ?? '').startsWith('EGO_TASK_') || error.mayHaveLateEffects) canDetach = false;
+      try {
+        const iframeDeadline = checkingPlayback ? Date.now() + PLAYBACK_IFRAME_BUDGET_MS : Infinity;
+        const attachOptions = checkingPlayback ? { timeout: PLAYBACK_IFRAME_BUDGET_MS } : undefined;
+        ({ sessionId } = await page.cdp('Target.attachToTarget', { targetId: target.targetId, flatten: false }, attachOptions));
+        state = await scanVideo((method, params) => childCdp(page, sessionId, method, params, iframeDeadline), args);
+      } catch (error) {
+        if (checkingPlayback && !isPlaybackSpaceFailure(error)) {
+          uncheckedFrameError ??= error;
+          continue;
+        }
+        canDetach = !checkingPlayback && !String(errorCode(error) ?? '').startsWith('EGO_TASK_') && !error.mayHaveLateEffects;
         throw error;
-      } finally { if (canDetach) await page.cdp('Target.detachFromTarget', { sessionId }); }
+      } finally {
+        if (sessionId && canDetach) {
+          const detachOptions = checkingPlayback ? { timeout: PLAYBACK_IFRAME_BUDGET_MS } : undefined;
+          try { await page.cdp('Target.detachFromTarget', { sessionId }, detachOptions); }
+          catch (error) { if (!checkingPlayback || isPlaybackSpaceFailure(error)) throw error; }
+        }
+      }
       if (state) break;
     }
+    if (!state && uncheckedFrameError) throw uncheckedFrameError;
   }
   if (!state) {
-    if (args.action === 'playback-status') return { found: false, playing: false };
+    if (checkingPlayback) return { found: false, playing: false };
     if (args.frameId) throw new Error('Video frame no longer exists or contains no matching video. Inspect again without frameId.');
     return { found: false, message: 'No HTML5 video found in accessible frames. The player may still be loading or use a different media surface.' };
   }

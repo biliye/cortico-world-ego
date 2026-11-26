@@ -117,7 +117,41 @@ it('returns an iframe playback timeout beside the result for a healthy target', 
     await vi.advanceTimersByTimeAsync(1);
     expect(healthyPage.cdp).toHaveBeenCalled();
     await expect(check).resolves.toEqual({ spaceId: 1, value: { playing: [null, true] } });
-    expect(calls.some(call => call.method === 'Target.detachFromTarget')).toBe(false);
+    expect(calls.filter(call => call.method === 'Target.detachFromTarget')).toHaveLength(1);
+  } finally { vi.useRealTimers(); }
+});
+it.each([
+  { video: true, frameId: undefined, result: true, visited: ['hung-child', 'video-child'] },
+  { video: false, frameId: undefined, result: null, visited: ['hung-child', 'video-child'] },
+  { video: true, frameId: 'video-child', result: true, visited: ['video-child'] },
+])('checks same-page iframes with a timeout and frame hint $frameId, returning $result', async ({ video, frameId, result, visited }) => {
+  vi.useFakeTimers();
+  try {
+    task.cdp = vi.fn(async () => ({ targetInfos: ['hung-child', 'video-child'].map(targetId => ({ targetId, parentId: 'parent' })) }));
+    const attached: string[] = [], detached: string[] = [];
+    page.cdp = vi.fn(async (method: string, params: any, options: any) => {
+      if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'parent' } } };
+      if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
+      if (method === 'Runtime.evaluate') return { result: { value: { found: false } } };
+      if (method === 'Target.attachToTarget') { attached.push(params.targetId); return { sessionId: params.targetId }; }
+      if (method === 'Target.detachFromTarget') { detached.push(params.sessionId); return {}; }
+      expect(method).toBe('Target.sendMessageToTarget');
+      expect(options.timeout).toBeGreaterThan(0);
+      expect(options.timeout).toBeLessThanOrEqual(2000);
+      if (params.sessionId !== 'hung-child') {
+        const message = JSON.parse(params.message);
+        const childResult = message.method === 'Page.getFrameTree' ? { frameTree: { frame: { id: 'video-child' } } }
+          : message.method === 'Page.createIsolatedWorld' ? { executionContextId: 2 }
+          : { result: { value: { found: video, playing: video } } };
+        pending.push({ method: 'Target.receivedMessageFromTarget', params: { sessionId: params.sessionId, message: JSON.stringify({ id: message.id, result: childResult }) } });
+      }
+      return {};
+    });
+    const check = execute({ operation: 'tabs', args: { spaceId: 1, playback: [{ page: 'p1', frameId }] } });
+    await vi.advanceTimersByTimeAsync(2000);
+    await expect(check).resolves.toEqual({ spaceId: 1, value: { playing: [result] } });
+    expect(attached).toEqual(visited);
+    expect(detached).toEqual(visited);
   } finally { vi.useRealTimers(); }
 });
 it('observes delegated control without selecting a page, claiming or taking over', async () => {

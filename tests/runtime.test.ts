@@ -3,7 +3,7 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execute } from '../src/bridge-runtime.mjs';
 import { MAX_FILE_BYTES } from '../src/file-transfer.mjs';
-import { runInNewContext } from 'node:vm';
+import { createContext, runInContext, runInNewContext } from 'node:vm';
 let dir: string;
 let task: any, page: any, calls: any[], pending: any[];
 beforeEach(async () => {
@@ -50,6 +50,26 @@ it('attaches only iframe targets descending from the managed page and detaches i
   expect(result.value.found).toBe(true); expect(result.value.frameId).toBe('owned-child');
   expect(calls.filter(c => c.method === 'Target.attachToTarget').map(c => c.params.targetId)).toEqual(['owned-child']);
   expect(calls.some(c => c.method === 'Target.detachFromTarget')).toBe(true);
+});
+it('returns the smooth scene before Bilibili subtitles arrive and retrieves them in a later command', async () => {
+  const location = new URL('https://www.bilibili.com/video/BV1xx');
+  let respond!: (value: Response) => void;
+  const fetch = vi.fn(() => new Promise<Response>(resolve => { respond = resolve; }));
+  const context = createContext({ location, URL, AbortSignal, fetch, performance: { getEntriesByType: () => [] },
+    window: { __INITIAL_STATE__: { videoData: { cid: 42, aid: 1 } } } });
+  page.url = async () => location.href;
+  page.evaluate = (fn: string | Function, args: unknown) => runInContext(typeof fn === 'string' ? fn : `(${fn.toString()})(${JSON.stringify(args)})`, context);
+  const scene = await execute({ operation: 'video', args: { page: 'p1', action: 'look', smoothWatch: true, since: 0 } });
+  expect(scene.error).toBeUndefined();
+  expect(scene.value).toMatchObject({ image: { mime: 'image/jpeg' }, enrichmentId: expect.any(String) });
+  expect(fetch).toHaveBeenCalledOnce();
+  const id = scene.value.enrichmentId;
+  const poll = () => execute({ operation: 'video', args: { page: 'p1', action: 'watch-enrichment', ids: [id] } });
+  expect((await poll()).value[id]).toMatchObject({ complete: false, value: { danmaku: { status: 'unavailable' } } });
+  respond(new Response(JSON.stringify({ code: 0, data: {} })));
+  await vi.waitFor(async () => expect((await poll()).value[id]).toMatchObject({ complete: true,
+    value: { bilibili: { subtitleStatus: 'no-subtitles-returned' } } }));
+  expect((await poll()).value[id]).toBeNull();
 });
 it('refuses to close a user-owned tab even when it is managed', async () => {
   task.tabs = async () => [{ label: 'p1', openedBy: 'unknown' }];

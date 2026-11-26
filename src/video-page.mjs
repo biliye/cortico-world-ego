@@ -47,12 +47,12 @@ export async function videoOperation(args) {
   const result = { found: true, count: videos.length, time, duration: Number.isFinite(v.duration) ? v.duration : null,
     paused: v.paused, ended: v.ended, playbackRate: v.playbackRate, readyState: v.readyState, width: v.videoWidth, height: v.videoHeight,
     source: v.currentSrc, tracks, capture: null, image: null };
-  // Hold the playhead while the host assembles/enriches a watched scene.
+  // Check the target before capturing or holding playback.
   if (args.collecting && Number.isFinite(args.targetTime) && time < args.targetTime - 0.02 && !v.ended) {
     result.samplePending = true; return result;
   }
   if (batchComplete) result.batchComplete = true;
-  if (action === 'look' && (args.holdPlayback || batchComplete) && !v.paused && !v.ended) {
+  if (action === 'look' && args.smoothWatch !== true && (args.holdPlayback || batchComplete) && !v.paused && !v.ended) {
     v.pause(); result.playbackHeld = true;
   }
   if (action === 'look' || action === 'sample') {

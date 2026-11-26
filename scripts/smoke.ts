@@ -27,7 +27,8 @@ const server = createServer((req, res) => {
   else if (req.url === '/live') res.end(`<!doctype html><meta charset="utf-8"><title>Ego live video fixture</title><video controls muted width="640"></video><script>
 const c=document.createElement('canvas');c.width=640;c.height=360;const g=c.getContext('2d');const start=performance.now();
 setInterval(()=>{const t=(performance.now()-start)/1000;g.fillStyle=['#137464','#783dc7','#a33745','#2859ba'][Math.floor(t/4)%4];g.fillRect(0,0,640,360);g.fillStyle='#fff';g.font='36px sans-serif';g.fillText('EGO VIDEO '+t.toFixed(1)+' seconds',32,180);},100);
-const v=document.querySelector('video');v.srcObject=c.captureStream(10);const tr=v.addTextTrack('subtitles','字幕验收','zh');tr.mode='showing';tr.addCue(new VTTCue(0,60,'Ego 15 秒内多帧采样验收'));v.play().then(()=>window.fixtureReady=true);
+const v=document.querySelector('video');v.srcObject=c.captureStream(10);const tr=v.addTextTrack('subtitles','字幕验收','zh');tr.mode='showing';tr.addCue(new VTTCue(0,60,'Ego 15 秒内多帧采样验收'));
+window.fixturePauses=0;v.addEventListener('pause',()=>window.fixturePauses++);v.play().then(()=>window.fixtureReady=true);
 </script>`);
   else if (req.url === '/iframe') res.end(`<title>Cross origin video</title><h1>iframe fixture</h1><iframe width="800" height="550" src="http://localhost:${(server.address() as any).port}/video"></iframe>`);
   else res.end('<!doctype html><meta charset="utf-8"><title>Ego World smoke</title><h1>浏览器验收</h1><label>关键词 <input id="query"></label><button id="submit" onclick="document.querySelector(\'#result\').textContent=document.querySelector(\'#query\').value">提交</button><p id="result"></p><a id="popup" href="/popup" target="_blank">新开页面</a>');
@@ -79,6 +80,9 @@ try {
   assert.equal(sceneData.capture, 'video-mosaic'); assert.equal(sceneData.frameTimes.length, 4);
   assert(sceneData.frameTimes.at(-1) - sceneData.frameTimes[0] >= 10, 'Frames must span the current observation window');
   evidence.periodicScene = sceneData;
+  const playback = data(await call('evaluate', { page, expression: '({ paused: document.querySelector("video").paused, pauses: window.fixturePauses })' }));
+  assert.deepEqual(playback, { paused: false, pauses: 0 });
+  evidence.smoothPlayback = playback;
   await writeFile(join(dir, 'video-mosaic.jpg'), (scene.blobs[0] as any).bytes);
   await call('video', { page, action: 'pause' }); assert.equal(await scenes[0].render(), null);
   await call('navigate', { page, url: `http://127.0.0.1:${port}/iframe` });

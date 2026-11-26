@@ -3,6 +3,7 @@ import { videoOperation } from './video-page.mjs';
 import { bilibiliDanmaku, decodeDanmakuSegment } from './bilibili-danmaku.mjs';
 import { bilibiliComments } from './bilibili-comments.mjs';
 import { downloadFile, uploadFile } from './file-transfer.mjs';
+import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
 const PLAYBACK_IFRAME_BUDGET_MS = 2000;
@@ -134,6 +135,7 @@ async function capturePage(task, page, args) {
   return { image: { base64: (await readFile(args.screenshotFile)).toString('base64'), mime: 'image/png' }, restoredWindow };
 }
 async function runVideo(task, page, args) {
+  if (args.action === 'watch-enrichment') return page.evaluate(collectVideoEnrichment, args.ids);
   const checkingPlayback = args.action === 'playback-status';
   const cdp = (method, params) => page.cdp(method, params);
   let state = await scanVideo(cdp, args);
@@ -182,22 +184,64 @@ async function runVideo(task, page, args) {
     if (args.frameId) throw new Error('Video frame no longer exists or contains no matching video. Inspect again without frameId.');
     return { found: false, message: 'No HTML5 video found in accessible frames. The player may still be loading or use a different media surface.' };
   }
-  if ((args.action === 'look' || state.batchComplete) && !state.samplePending && !state.image) {
+  const capturedScene = (args.action === 'look' || state.batchComplete) && !state.samplePending;
+  if (capturedScene && !state.image) {
     const shot = await capturePage(task, page, args);
     state.image = shot.image; state.restoredWindow = shot.restoredWindow;
     state.capture = 'viewport-fallback';
     state.captureNote = 'Video pixels could not be read (CORS/DRM/not ready). This image is the page viewport at capture time; it may not show the video.';
   }
-  if ((args.action === 'look' || state.batchComplete) && !state.samplePending && /(^|\.)bilibili\.com$/.test(new URL(await page.url()).hostname)) {
+  if (capturedScene && /(^|\.)bilibili\.com$/.test(new URL(await page.url()).hostname)) {
     const range = { time: state.time, since: args.since <= state.time ? args.since : Math.max(0, state.time - 15) };
-    try { state.bilibili = await page.evaluate(bilibiliSubtitles, range); }
-    catch (error) { if (errorCode(error)?.startsWith('EGO_TASK_') || error.mayHaveLateEffects) throw error; state.subtitleError = error.message; }
-    if (args.danmaku !== false) {
-      try { state.danmaku = await page.evaluate(`(${bilibiliDanmaku.toString()})(${JSON.stringify(range)},${decodeDanmakuSegment.toString()})`); }
-      catch (error) { if (errorCode(error)?.startsWith('EGO_TASK_') || error.mayHaveLateEffects) throw error; state.danmaku = { status: 'unavailable', error: error.message }; }
+    if (args.smoothWatch) {
+      const id = randomUUID();
+      const job = JSON.stringify({ id, range, danmaku: args.danmaku !== false });
+      try {
+        await page.evaluate(`(${startVideoEnrichment})(${job}, ${bilibiliSubtitles}, ${bilibiliDanmaku}, ${decodeDanmakuSegment})`);
+        state.enrichmentId = id;
+      } catch (error) {
+        if (errorCode(error)?.startsWith('EGO_TASK_') || error.mayHaveLateEffects) throw error;
+        state.enrichmentIncomplete = true;
+      }
+    } else {
+      try { state.bilibili = await page.evaluate(bilibiliSubtitles, range); }
+      catch (error) { if (errorCode(error)?.startsWith('EGO_TASK_') || error.mayHaveLateEffects) throw error; state.subtitleError = error.message; }
+      if (args.danmaku !== false) {
+        try { state.danmaku = await page.evaluate(`(${bilibiliDanmaku.toString()})(${JSON.stringify(range)},${decodeDanmakuSegment.toString()})`); }
+        catch (error) { if (errorCode(error)?.startsWith('EGO_TASK_') || error.mayHaveLateEffects) throw error; state.danmaku = { status: 'unavailable', error: error.message }; }
+      }
     }
   }
   return state;
+}
+// Page-scoped jobs reuse the site's session. Only scheduling and reading results occupy the CLI queue.
+function startVideoEnrichment({ id, range, danmaku }, readSubtitles, readDanmaku, decode) {
+  const jobs = globalThis.__corticoEgoVideoEnrichment ??= new Map();
+  // The host retains at most four scenes. Reserve room for the new one before it can evict the oldest.
+  if (jobs.size >= 4) jobs.delete(jobs.keys().next().value);
+  const job = { url: location.href, remaining: danmaku ? 2 : 1, value: {} };
+  jobs.set(id, job);
+  void readSubtitles(range).then(
+    value => { job.value.bilibili = value; },
+    error => { job.value.subtitleError = error.message; },
+  ).finally(() => { job.remaining--; });
+  if (danmaku) void readDanmaku(range, decode).then(
+    value => { job.value.danmaku = value; },
+    error => { job.value.danmaku = { status: 'unavailable', error: error.message }; },
+  ).finally(() => { job.remaining--; });
+  return true;
+}
+function collectVideoEnrichment(ids) {
+  const jobs = globalThis.__corticoEgoVideoEnrichment;
+  return Object.fromEntries(ids.map(id => {
+    const job = jobs?.get(id);
+    if (!job || job.url !== location.href) {
+      jobs?.delete(id);
+      return [id, null];
+    }
+    if (!job.remaining) jobs.delete(id);
+    return [id, { complete: !job.remaining, value: job.value }];
+  }));
 }
 let childMessageId = 1;
 async function childCdp(page, sessionId, method, params, iframeDeadline) {

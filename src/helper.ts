@@ -27,7 +27,9 @@ export async function startHelper(options: { dir: string; cliFile?: string; time
   let closeServer = async () => {};
   const server = createServer(async (req, res) => {
     res.setHeader('content-type', 'application/json; charset=utf-8'); res.setHeader('cache-control', 'no-store');
-    const reply = (status: number, value: unknown) => { res.writeHead(status); res.end(JSON.stringify(value)); };
+    const reply = (status: number, value: unknown) => {
+      if (!res.destroyed) { res.writeHead(status); res.end(JSON.stringify(value)); }
+    };
     const auth = req.headers.authorization ?? '';
     const wanted = `Bearer ${token}`;
     if (req.headers.origin || !/^127\.0\.0\.1:\d+$/.test(req.headers.host ?? '')) return reply(403, { error: 'Local requests without Origin only' });
@@ -41,7 +43,18 @@ export async function startHelper(options: { dir: string; cliFile?: string; time
       if (!req.headers['content-type']?.startsWith('application/json')) return reply(415, { error: 'JSON required' });
       const request = JSON.parse(await body(req));
       if (!OPERATIONS.has(request.operation) || !request.args || typeof request.args !== 'object' || Array.isArray(request.args)) return reply(400, { error: 'Unsupported operation or arguments' });
-      const run = queue.then(() => bridge.run(request.operation, request.args));
+      const backgroundRead = (request.operation === 'video' && request.args.action === 'watch-enrichment')
+        || (request.operation === 'tabs' && Array.isArray(request.args.playback));
+      // A dropped background read can be cancelled without interrupting an operator command.
+      const cancellation = backgroundRead ? new AbortController() : undefined;
+      if (cancellation) {
+        if (res.destroyed) return;
+        res.once('close', () => { if (!res.writableFinished) cancellation.abort(); });
+      }
+      const run = queue.then(() => {
+        cancellation?.signal.throwIfAborted();
+        return bridge.run(request.operation, request.args, cancellation?.signal);
+      });
       queue = run.then(() => {}, () => {});
       return reply(200, await run);
     } catch (error) { return reply(400, { error: String(error) }); }

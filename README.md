@@ -175,7 +175,7 @@ pnpm build:webui
 
 从 Cortico checkout 运行 `pnpm describe:extension <包目录>` 与 `pnpm check:extension <包目录>`。WebUI bundle 已包含在安装包中。
 
-本地 `scripts/smoke.ts` 通过真实 Ego 运行合成视频与中文字幕，验证表单、弹出页、截图、播放/暂停/跳转、定时观察、旧帧撤回与跨域 iframe。它使用专用测试 Space，成功时关闭测试 Space；不运行真实 bot，也不使用模型密钥。再次验收应为新的测试任务设置新的 `spaceName`。
+本地 `scripts/smoke.ts` 通过真实 Ego 运行合成视频与中文字幕，验证表单、弹出页、截图、播放/暂停/跳转、默认流畅陪看出图前播放器未暂停、旧帧撤回与跨域 iframe。它使用专用测试 Space，成功时关闭测试 Space；不运行真实 bot，也不使用模型密钥。再次验收应为新的测试任务设置新的 `spaceName`。
 
 `pnpm smoke:tail` 验证观察周期未满就结束的短视频：启动只回文字，结束后真实返回多帧拼图，暂停后旧场景可撤回；证据和图片位于工位内 `.test-data/smoke-short-tail/`。
 

@@ -37,6 +37,28 @@ it('authenticates local requests and rejects cross-origin requests and unknown o
   expect(await new HelperBridge(dir, () => 1000).probe()).toBe(true);
   expect((await new HelperBridge(dir, () => 1000).run('tabs', {})).value).toBe(null); expect(called).toBe(1);
 });
+it('cancels a disconnected video metadata read so the next browser command can run', async () => {
+  let started!: () => void;
+  const probeStarted = new Promise<void>(resolve => { started = resolve; });
+  const service = await startHelper({ dir, checkElevated: async () => false, bridge: {
+    async run(operation, args, signal) {
+      if (args.action === 'watch-enrichment') {
+        expect(signal).toBeDefined();
+        started();
+        await new Promise<void>(resolve => signal!.addEventListener('abort', () => resolve(), { once: true }));
+      }
+      return { value: operation };
+    },
+  } });
+  close = service.close;
+  const bridge = new HelperBridge(dir, () => 1000);
+  const controller = new AbortController();
+  const probe = bridge.run('video', { action: 'watch-enrichment' }, controller.signal);
+  await probeStarted;
+  controller.abort();
+  expect((await probe).uncertain).toBe(true);
+  expect(await bridge.run('tabs', {}, AbortSignal.timeout(1000))).toEqual({ value: 'tabs' });
+});
 it('automatically uses the helper only after a definite elevated-client rejection', async () => {
   const ops: string[] = [];
   const ordinary: EgoBridge = { run: async (op) => { ops.push(op); return { value: 'ordinary' }; } };

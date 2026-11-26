@@ -1041,17 +1041,22 @@ describe('video observation lifetime', () => {
     expect(polls).toBe(1);
     expect(world.status()).toMatchObject({ halted: false, connected: true, watching: 'p1' });
     expect(deferred).toHaveLength(0);
-    await advance(1_500);
+    await advance(2_999);
+    expect(polls).toBe(1);
+    await advance(1);
     expect(polls).toBe(2);
     const scene = await deferred[0].render();
     expect(scene).toMatchObject({ text: expect.stringContaining('"subtitleStatus":"available"') });
     expect(scene).toMatchObject({ text: expect.not.stringContaining('enrichmentIncomplete') });
   });
-  it('withdraws optional scenes if an enrichment poll reports that the operator took control', async () => {
+  it.each([
+    ['the operator took control', { error: 'Operator took control', code: 'EGO_TASK_SPACE_USER_IN_CONTROL' }],
+    ['the receipt comes from a different Space', { spaceId: 2, value: { first: { complete: true, value: {} } } }],
+  ])('withdraws optional scenes if an enrichment poll reports %s', async (_reason, reply) => {
     vi.useFakeTimers();
     const original = browser.run.bind(browser);
     browser.run = async (op, args) => {
-      if (args.action === 'watch-enrichment') return { error: 'Operator took control', code: 'EGO_TASK_SPACE_USER_IN_CONTROL' };
+      if (args.action === 'watch-enrichment') return reply;
       const receipt = await original(op, args);
       if (args.action === 'look') receipt.value.enrichmentId = 'first';
       return receipt;
@@ -1063,6 +1068,26 @@ describe('video observation lifetime', () => {
     const calls = browser.calls.length;
     await advance(30_000);
     expect(browser.calls).toHaveLength(calls);
+  });
+  it('releases a captured scene without retrying optional reads when the Ego app is missing', async () => {
+    vi.useFakeTimers();
+    const original = browser.run.bind(browser);
+    let polls = 0;
+    browser.run = async (op, args) => {
+      if (args.action === 'watch-enrichment') {
+        polls++;
+        return { error: 'Failed to start ego lite', code: 'EGO_APP_NOT_FOUND' };
+      }
+      const receipt = await original(op, args);
+      if (args.action === 'look' && args.batch === 1) receipt.value.enrichmentId = 'first';
+      return receipt;
+    };
+    await call('video', { page: 'p1', action: 'watch' });
+    await advance(18_000);
+    expect(await deferred[0].render()).toMatchObject({ text: expect.stringContaining('"enrichmentIncomplete":true') });
+    expect(world.status()).toMatchObject({ halted: false, watching: 'p1' });
+    await advance(15_000);
+    expect(polls).toBe(1);
   });
   it('pauses at a bounded scene backlog and resumes after delivery without resetting collection', async () => {
     cfg.video.smoothWatch = false;

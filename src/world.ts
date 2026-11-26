@@ -42,6 +42,7 @@ interface PendingScene {
 }
 const MAX_PENDING_SCENES = 4;
 const VIDEO_ENRICHMENT_POLL_MS = 1500;
+const VIDEO_ENRICHMENT_RETRY_MS = 3000;
 const VIDEO_ENRICHMENT_PROBE_MS = 2000;
 const VIDEO_ENRICHMENT_TIMEOUT_MS = 12_000;
 type VideoEnrichmentResults = Record<string, { complete: boolean; value: Record<string, unknown> } | null>;
@@ -694,10 +695,10 @@ export class EgoWorld implements World {
     return this.running && !this.saved.halted && this.generation === watch.generation
       && (this.watch === watch || (watch.completed === true && this.watch === undefined));
   }
-  private flushVideoScenes(watch: Watch): void {
+  private flushVideoScenes(watch: Watch, pollDelay?: number): void {
     let ready = 0;
     for (const scene of this.pendingScenes) {
-      if (scene.enrichment) { this.scheduleVideoEnrichment(watch); break; }
+      if (scene.enrichment) { this.scheduleVideoEnrichment(watch, pollDelay); break; }
       if (scene.value) {
         scene.outcome = this.outcome(scene.value);
         scene.value = undefined;
@@ -725,17 +726,19 @@ export class EgoWorld implements World {
       }, { trigger: 'debounce' });
     }
   }
-  private scheduleVideoEnrichment(watch: Watch): void {
+  private scheduleVideoEnrichment(watch: Watch, delay = VIDEO_ENRICHMENT_POLL_MS): void {
     if (this.enrichmentTimer) return;
+    const deadline = Math.min(...[...this.pendingScenes].map(scene => scene.enrichment?.expiresAt ?? Infinity));
     const timer = setTimeout(() => {
       void this.serial(async () => {
         if (this.enrichmentTimer !== timer || !this.canDeliverVideo(watch)) return;
         this.enrichmentTimer = undefined;
-        const waiting = [...this.pendingScenes].flatMap(scene => scene.enrichment ? [scene.enrichment.id] : []);
-        if (!waiting.length) return;
+        const now = Date.now();
+        const waiting = [...this.pendingScenes].flatMap(scene => scene.enrichment && scene.enrichment.expiresAt > now ? [scene.enrichment.id] : []);
         const spaceId = this.saved.spaceId;
         let results: VideoEnrichmentResults | undefined;
-        if (spaceId) {
+        let appMissing = false;
+        if (spaceId && waiting.length) {
           const signal = AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(VIDEO_ENRICHMENT_PROBE_MS)]);
           // Polling reads optional data. Leave World recovery to foreground operations and sampling.
           const receipt = await this.bridge.run('video', { spaceId, page: watch.page, action: 'watch-enrichment', ids: waiting }, signal)
@@ -746,19 +749,20 @@ export class EgoWorld implements World {
             await this.event('video.state', 'Video observation stopped: the original Space is unavailable or no longer under agent control.', true);
             return;
           }
+          appMissing = receipt?.code === 'EGO_APP_NOT_FOUND';
           if (receipt?.spaceId === spaceId && !receipt.error && !receipt.code && !receipt.uncertain) results = receipt.value;
         }
         for (const scene of this.pendingScenes) {
           if (!scene.enrichment || !scene.value) continue;
           const result = results?.[scene.enrichment.id];
           Object.assign(scene.value, result?.value);
-          if (result !== null && !result?.complete && Date.now() < scene.enrichment.expiresAt) continue;
+          if (!appMissing && result !== null && !result?.complete && Date.now() < scene.enrichment.expiresAt) continue;
           if (!result?.complete) scene.value.enrichmentIncomplete = true;
           scene.enrichment = undefined;
         }
-        this.flushVideoScenes(watch);
+        this.flushVideoScenes(watch, waiting.length && !results ? VIDEO_ENRICHMENT_RETRY_MS : VIDEO_ENRICHMENT_POLL_MS);
       });
-    }, VIDEO_ENRICHMENT_POLL_MS);
+    }, Math.min(delay, Math.max(0, deadline - Date.now())));
     this.enrichmentTimer = timer;
     timer.unref?.();
   }

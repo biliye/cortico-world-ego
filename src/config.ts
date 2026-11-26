@@ -9,13 +9,13 @@ export interface EgoConfigSection {
   restoreMinimized: boolean;
   connectionMode: 'auto' | 'direct' | 'helper';
   helperDir: string;
-  video: { intervalMs: number; maxFrames: number; frameWidth: number; danmaku: boolean };
+  video: { intervalMs: number; maxFrames: number; frameWidth: number; danmaku: boolean; smoothWatch?: boolean };
   search?: SearchSettings;
 }
 export const EGO_DEFAULTS: EgoConfigSection = {
   enabled: false, cliFile: 'ego-browser', spaceName: '', requestTimeoutMs: 45000, maxChars: 16000, restoreMinimized: true,
   connectionMode: 'auto', helperDir: '',
-  video: { intervalMs: 15000, maxFrames: 4, frameWidth: 640, danmaku: true },
+  video: { intervalMs: 15000, maxFrames: 4, frameWidth: 640, danmaku: true, smoothWatch: true },
   search: structuredClone(DEFAULT_SEARCH_SETTINGS),
 };
 export function egoConfigGroup(language = 'zh'): ConfigGroup {
@@ -29,6 +29,7 @@ export function egoConfigGroup(language = 'zh'): ConfigGroup {
     'worlds.ego.requestTimeoutMs': prop('integer', '命令超时（毫秒）', 'Command timeout (ms)', { minimum: 5000, maximum: 120000, 'x-hot': true, description: zh ? '默认 45000，即 45 秒。这是命令总时限，不会提高 Ego 自身约 15 秒的页面求值上限；纯等待使用 ego_wait。' : 'Default 45000 = 45 seconds. This command deadline does not extend Ego’s approximately 15-second page evaluation limit; use ego_wait for delays.' }),
     'worlds.ego.maxChars': prop('integer', '正文返回上限', 'Text receipt limit', { minimum: 1000, maximum: 60000, 'x-hot': true }),
     'worlds.ego.restoreMinimized': prop('boolean', '截图时恢复最小化的 Ego 窗口', 'Restore minimized Ego window for screenshots', { 'x-hot': true, description: zh ? 'Ego 在最小化时无法截图。启用后恢复窗口；截图会选中目标页，不额外置顶。' : 'Ego cannot screenshot a minimized window. Restore it when enabled; screenshots select the target page without an extra foreground request.' }),
+    'worlds.ego.video.smoothWatch': prop('boolean', '流畅陪看', 'Smooth watch', { 'x-hot': true, description: zh ? '默认开启。陪看时继续播放，投递积压时优先保留最近的画面。关闭后可暂歇播放以保留采样。下次开始陪看时生效。' : 'On by default. Keep playing during observation and retain the most recent scenes when delivery falls behind. Turn off to pause as needed to preserve sampling. Applies to the next watch.' }),
     'worlds.ego.video.intervalMs': prop('integer', '默认采集窗口（视频毫秒）', 'Default sampling window (video ms)', { minimum: 10000, maximum: 120000, 'x-hot': true, description: zh ? '默认 15000：每图计划覆盖 15 秒视频内容，实际墙钟等待受倍速、卡顿和处理耗时影响。热改下一批生效；bot 可临时覆盖本次观看。' : 'Default 15000: target 15 video seconds per scene. Wall-clock delivery depends on playback rate, stalls and processing. Hot changes apply next batch; the bot may override this watch only.' }),
     'worlds.ego.video.maxFrames': prop('integer', '默认每张拼图最多几帧', 'Default maximum frames per scene', { minimum: 1, maximum: 9, 'x-hot': true, description: zh ? '默认 4：15 视频秒内约每 5 秒采一帧；最多 9 帧。热改下一批生效，本次观看的临时覆盖优先；中间采样不逐帧发送。' : 'Default 4: approximately every 5 video seconds within 15 video seconds. Up to 9 frames. Hot changes apply next batch; temporary watch parameters take priority. Intermediate samples stay local.' }),
     'worlds.ego.video.frameWidth': prop('integer', '单帧宽度（像素）', 'Frame width (px)', { minimum: 240, maximum: 1280, 'x-hot': true }),

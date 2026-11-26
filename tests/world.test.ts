@@ -982,7 +982,45 @@ describe('video observation lifetime', () => {
     expect(deferred).toHaveLength(2); expect(deferred[0].render()).not.toBe(null); expect(deferred[1].render()).not.toBe(null);
     expect(deferred[0].render()).toBe(null);
   });
+  it('keeps playing by default for old configurations and retains only the four newest scenes', async () => {
+    expect(EGO_DEFAULTS.video.smoothWatch).toBe(true);
+    delete cfg.video.smoothWatch;
+    vi.useFakeTimers();
+    browser.updatedAt = Date.now();
+    await call('video', { page: 'p1', action: 'watch' });
+    await advance(90_000);
+    expect(world.status().watching).toBe('p1');
+    const operations = browser.calls.filter(call => call.op === 'video');
+    expect(operations.filter(call => call.args.action === 'play')).toHaveLength(1);
+    expect(operations.some(call => call.args.action === 'pause' || call.args.holdPlayback)).toBe(false);
+    expect(deferred).toHaveLength(4);
+    for (const [index, item] of deferred.entries()) {
+      const scene = await item.render();
+      expect(scene).toMatchObject({ text: expect.stringContaining(`"batch":${index + 3}`) });
+      expect(scene).toMatchObject({ text: index === 0 ? expect.stringContaining('batches=2, from=10s, to=40s') : expect.not.stringContaining('Skipped video scenes') });
+    }
+  });
+  it('keeps sampling while a scene waits for Bilibili metadata, and flushes partial results on deadline', async () => {
+    vi.useFakeTimers();
+    const original = browser.run.bind(browser);
+    browser.run = async (op, args) => {
+      if (args.action === 'watch-enrichment') return { spaceId: 1,
+        value: { first: { complete: false, value: { bilibili: { subtitleStatus: 'available' } } } } };
+      const receipt = await original(op, args);
+      if (args.action === 'look' && args.batch === 1) receipt.value.enrichmentId = 'first';
+      return receipt;
+    };
+    await call('video', { page: 'p1', action: 'watch' });
+    await advance(25_000);
+    expect(deferred).toHaveLength(0);
+    expect(browser.calls.filter(call => call.args.action === 'sample' && call.args.batch === 2)).toHaveLength(2);
+    await advance(2_000);
+    const scene = await deferred[0].render();
+    expect(scene).toMatchObject({ text: expect.stringContaining('"enrichmentIncomplete":true') });
+    expect(scene).toMatchObject({ text: expect.stringContaining('"subtitleStatus":"available"') });
+  });
   it('pauses at a bounded scene backlog and resumes after delivery without resetting collection', async () => {
+    cfg.video.smoothWatch = false;
     vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });
     await advance(60000); expect(deferred).toHaveLength(4);
     expect(browser.calls.at(-1)?.args).toMatchObject({ action: 'pause', preserveFrames: true });
@@ -993,6 +1031,7 @@ describe('video observation lifetime', () => {
     for (const scene of deferred.slice(1)) expect(scene.render()).not.toBe(null);
   });
   it('does not resume playback from backlog delivery after an explicit pause', async () => {
+    cfg.video.smoothWatch = false;
     vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' }); await advance(60000);
     await call('video', { page: 'p1', action: 'pause' });
     const count = browser.calls.length;
@@ -1000,6 +1039,7 @@ describe('video observation lifetime', () => {
     await (world as any).queue; await advance(30000); expect(browser.calls).toHaveLength(count);
   });
   it('does not let play bypass a full observation queue', async () => {
+    cfg.video.smoothWatch = false;
     vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' }); await advance(60000);
     const count = browser.calls.length;
     const result = await call('video', { page: 'p1', action: 'play' });
@@ -1012,7 +1052,7 @@ describe('video observation lifetime', () => {
     expect(world.status().watching).toBe(null); expect(deferred).toHaveLength(0);
   });
   it('delivers nine actual frames per batch and shared boundaries despite slow receipts and enrichment', async () => {
-    vi.useFakeTimers(); cfg.video.maxFrames = 9;
+    vi.useFakeTimers(); cfg.video.maxFrames = 9; cfg.video.smoothWatch = false;
     let updatedAt = Date.now();
     const video = { tagName: 'VIDEO', currentSrc: 'video1', currentTime: 0, readyState: 4, videoWidth: 640, videoHeight: 360,
       duration: 600, paused: false, ended: false, textTracks: [], play() { this.paused = false; }, pause() { this.paused = true; } };

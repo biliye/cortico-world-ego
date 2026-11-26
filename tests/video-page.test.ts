@@ -76,3 +76,13 @@ it('flushes a late intermediate sample at the batch endpoint and holds playback 
   expect(scene.frameTimes).toEqual([0, 20]);
   expect((await f.capture(25, 'sample', { collecting: true })).frameTimes).toEqual([20, 25]);
 });
+it('keeps smooth playback running when a late sample completes a batch', async () => {
+  const f = fixture();
+  const options = { collecting: true, smoothWatch: true };
+  await f.capture(0, 'sample', options);
+  const scene = await f.capture(20, 'sample', { ...options, targetTime: 5, batchEndTime: 20 });
+  expect(scene).toMatchObject({ batchComplete: true, frameTimes: [0, 20], image: { mime: 'image/jpeg' } });
+  expect(scene.playbackHeld).toBeUndefined();
+  expect(f.video.paused).toBe(false);
+  expect((await f.capture(25, 'sample', options)).frameTimes).toEqual([20, 25]);
+});

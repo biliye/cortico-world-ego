@@ -32,9 +32,17 @@ interface Watch {
   page: string; frameId?: string; selector?: string; index?: number; since: number; source?: string; generation: number;
   nextSampleAt: number; batch: number; targetIndex: number; lastTime: number; playbackRate: number;
   plan: SamplingPlan; override?: SamplingOverride; pendingOverride?: SamplingOverride;
+  smoothWatch: boolean; deferredScenes: number; skipped?: { batches: number; from: number; to: number };
   completed?: boolean; backpressured?: boolean;
 }
+interface PendingScene {
+  page: string; from: number; to: number;
+  value?: Record<string, unknown>; outcome?: ToolOutcome;
+  enrichment?: { id: string; expiresAt: number };
+}
 const MAX_PENDING_SCENES = 4;
+const VIDEO_ENRICHMENT_POLL_MS = 1500;
+const VIDEO_ENRICHMENT_TIMEOUT_MS = 12_000;
 const SPACE_RESET_HINT = 'Old page labels and refs are invalid; use ego_tabs and reopen needed pages. Video watching has not resumed. The failed operation was not replayed.';
 interface SavedState { spaceId?: number; halted: boolean; reason: string; code?: string; spaceMissing?: boolean; uncertain?: boolean; observationTimeout?: boolean; evaluation?: EvaluationTimeout; evaluationRecoveryBlocked?: string; lastUnknownEvaluation?: EvaluationTimeout }
 const UNKNOWN_EVALUATION_HINT = 'The timed-out script outcome remains unknown and it may still have late effects. Do not replay it automatically; inspect the current page and reconcile any submission before continuing. Video watching has not resumed.';
@@ -63,6 +71,7 @@ export class EgoWorld implements World {
   private queue: Promise<unknown> = Promise.resolve();
   private lifetime = new AbortController();
   private timer?: ReturnType<typeof setTimeout>;
+  private enrichmentTimer?: ReturnType<typeof setTimeout>;
   private readonly playing = new Map<string, { target: PlaybackTarget; failures: number }>();
   private playbackTimer?: ReturnType<typeof setTimeout>;
   private playbackProbe?: AbortController;
@@ -76,7 +85,7 @@ export class EgoWorld implements World {
   private checkingControl = false;
   private watch?: Watch;
   private generation = 0;
-  private pendingScenes = new Set<{ page: string; outcome?: ToolOutcome }>();
+  private readonly pendingScenes = new Set<PendingScene>();
   constructor(private readonly options: EgoWorldOptions) {
     this.search = new EgoSearch({ settings: () => options.cfg.search, secret: options.secret, request: options.searchRequest });
     this.spaceName = options.cfg.spaceName || `Cortico-${createHash('sha256').update(options.botDir).digest('hex').slice(0, 12)}`;
@@ -524,7 +533,7 @@ export class EgoWorld implements World {
   }
   private cancelWatch(): void {
     this.generation++; if (this.timer) clearTimeout(this.timer); this.timer = undefined; this.watch = undefined;
-    for (const scene of this.pendingScenes) scene.outcome = undefined;
+    clearTimeout(this.enrichmentTimer); this.enrichmentTimer = undefined;
     this.pendingScenes.clear();
   }
   private async invokeTool(operation: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome> {
@@ -582,7 +591,7 @@ export class EgoWorld implements World {
     const startedAt = Date.now();
     const watch: Watch = { page: String(args.page), frameId: value.frameId, selector: args.selector as string | undefined, index: args.index as number | undefined,
       since: value.time, source: value.source, generation: this.generation, nextSampleAt: startedAt, batch: 1, targetIndex: 1,
-      lastTime: value.time, playbackRate: 1, plan, override };
+      lastTime: value.time, playbackRate: 1, plan, override, smoothWatch: this.options.cfg.video.smoothWatch !== false, deferredScenes: 0 };
     this.watch = watch;
     let scene;
     try { scene = await this.command('video', { ...videoArgs, action: 'sample', frameId: value.frameId }, signal); }
@@ -669,16 +678,75 @@ export class EgoWorld implements World {
       ...samplingSummary(watch.plan), batch: watch.batch, actualVideoSpanSec: times.length ? times[times.length - 1]! - times[0]! : 0,
       maxActualGapSec: times.length > 1 ? Math.max(...times.slice(1).map((time, i) => time - times[i]!)) : 0,
       note: final ? 'Playback ended. These are the frames actually collected before the end; watching has stopped.' : 'Completed observation window. Use frameTimes in row-major order; the actual frame count can be below the configured maximum.' };
-    const pending = { page: watch.page, outcome: this.outcome(value) as ToolOutcome | undefined };
-    this.pendingScenes.add(pending);
-    this.host?.pushDeferred({ type: 'ego.video.scene', origin: 'external', senderKey: this.id,
-      render: () => {
-        if (!this.running || (this.watch !== watch && !(watch.completed && this.watch === undefined)) || this.generation !== watch.generation || this.saved.halted || !pending.outcome) return null;
-        const outcome = pending.outcome; pending.outcome = undefined; this.pendingScenes.delete(pending);
-        if (watch.backpressured) void this.serial(() => this.resumeAfterDelivery(watch));
-        return { text: `page=${watch.page}\n${outcome.text}`, blobs: outcome.blobs };
-      },
-    }, { trigger: 'debounce' });
+    if (watch.smoothWatch && this.pendingScenes.size >= MAX_PENDING_SCENES) {
+      const oldest = this.pendingScenes.values().next().value!;
+      this.pendingScenes.delete(oldest);
+      watch.skipped = { batches: (watch.skipped?.batches ?? 0) + 1, from: watch.skipped?.from ?? oldest.from, to: oldest.to };
+    }
+    const { enrichmentId, ...scene } = value;
+    this.pendingScenes.add({ page: watch.page, from: watch.since, to: value.time, value: scene,
+      ...(typeof enrichmentId === 'string' && { enrichment: { id: enrichmentId, expiresAt: Date.now() + VIDEO_ENRICHMENT_TIMEOUT_MS } }) });
+    this.flushVideoScenes(watch);
+  }
+  private canDeliverVideo(watch: Watch): boolean {
+    return this.running && !this.saved.halted && this.generation === watch.generation
+      && (this.watch === watch || (watch.completed === true && this.watch === undefined));
+  }
+  private flushVideoScenes(watch: Watch): void {
+    let ready = 0;
+    for (const scene of this.pendingScenes) {
+      if (scene.enrichment) { this.scheduleVideoEnrichment(watch); break; }
+      if (scene.value) {
+        scene.outcome = this.outcome(scene.value);
+        scene.value = undefined;
+      }
+      ready++;
+    }
+    // A queued callback takes the oldest ready scene at delivery, so replacing a scene does not grow Core's queue.
+    for (let remaining = ready - watch.deferredScenes; remaining > 0; remaining--) {
+      let rendered = false;
+      watch.deferredScenes++;
+      this.host?.pushDeferred({ type: 'ego.video.scene', origin: 'external', senderKey: this.id,
+        render: () => {
+          if (rendered || !this.canDeliverVideo(watch)) return null;
+          rendered = true;
+          watch.deferredScenes--;
+          const scene = this.pendingScenes.values().next().value;
+          if (!scene?.outcome) return null;
+          const outcome = scene.outcome; this.pendingScenes.delete(scene);
+          const skipped = watch.skipped;
+          watch.skipped = undefined;
+          if (watch.backpressured) void this.serial(() => this.resumeAfterDelivery(watch));
+          const gap = skipped ? `\nSkipped video scenes while delivery was backed up: batches=${skipped.batches}, from=${skipped.from}s, to=${skipped.to}s.` : '';
+          return { text: `page=${watch.page}${gap}\n${outcome.text}`, blobs: outcome.blobs };
+        },
+      }, { trigger: 'debounce' });
+    }
+  }
+  private scheduleVideoEnrichment(watch: Watch): void {
+    if (this.enrichmentTimer) return;
+    this.enrichmentTimer = setTimeout(() => {
+      void this.serial(async () => {
+        if (!this.canDeliverVideo(watch)) return;
+        this.enrichmentTimer = undefined;
+        const waiting = [...this.pendingScenes].flatMap(scene => scene.enrichment ? [scene.enrichment.id] : []);
+        if (!waiting.length) return;
+        let results: Record<string, { complete: boolean; value: Record<string, unknown> } | null> | undefined;
+        try { results = await this.command('video', { page: watch.page, action: 'watch-enrichment', ids: waiting }); }
+        catch { /* Optional metadata. Command still handles connection, control and uncertain failures. */ }
+        if (!this.canDeliverVideo(watch)) return;
+        for (const scene of this.pendingScenes) {
+          if (!scene.enrichment || !scene.value) continue;
+          const result = results?.[scene.enrichment.id];
+          if (result && !result.complete && Date.now() < scene.enrichment.expiresAt) continue;
+          Object.assign(scene.value, result?.value);
+          if (!result?.complete) scene.value.enrichmentIncomplete = true;
+          scene.enrichment = undefined;
+        }
+        this.flushVideoScenes(watch);
+      });
+    }, VIDEO_ENRICHMENT_POLL_MS);
+    this.enrichmentTimer.unref?.();
   }
   private async resumeAfterDelivery(watch: Watch): Promise<void> {
     if (!this.running || this.saved.halted || this.watch !== watch || !watch.backpressured || this.pendingScenes.size >= MAX_PENDING_SCENES) return;
@@ -699,7 +767,7 @@ export class EgoWorld implements World {
           const startedAt = Date.now();
           let value = await this.command('video', { ...watch, ...captureOptions(watch.plan), collecting: true,
             targetTime: watch.since + targetOffset(watch.plan, watch.targetIndex), batchEndTime: watch.since + watch.plan.windowSec,
-            action: observe ? 'look' : 'sample', consumeFrames: observe, holdPlayback: observe });
+            action: observe ? 'look' : 'sample', consumeFrames: observe, holdPlayback: observe && !watch.smoothWatch });
           if (!this.running || this.watch !== watch || this.generation !== watch.generation) return;
           if (!value.found || (!value.ended && value.paused) || value.source !== watch.source || value.time < watch.lastTime - 0.02) {
             this.cancelWatch(); await this.event('video.state', `Watching stopped: ${JSON.stringify({ page: watch.page, found: value.found, paused: value.paused, ended: value.ended, sourceChanged: value.source !== watch.source })}`, true); return;
@@ -729,7 +797,7 @@ export class EgoWorld implements World {
             while (watch.targetIndex < watch.plan.plannedFrames - 1 && watch.since + targetOffset(watch.plan, watch.targetIndex) <= value.time + 0.02) watch.targetIndex++;
           }
           this.updateTiming(watch, value, startedAt);
-          if (completed && this.pendingScenes.size >= MAX_PENDING_SCENES) {
+          if (completed && !watch.smoothWatch && this.pendingScenes.size >= MAX_PENDING_SCENES) {
             watch.backpressured = true;
             if (!value.playbackHeld) await this.command('video', { ...watch, action: 'pause', preserveFrames: true });
             await this.event('video.state', 'Playback paused while completed mosaics wait for delivery. Observation resumes automatically after delivery; queued scenes are retained.', true);

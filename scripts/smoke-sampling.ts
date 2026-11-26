@@ -21,6 +21,7 @@ rec.onstop=()=>{clearInterval(draw);const v=document.querySelector('video');v.sr
 });
 await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
 const cfg = structuredClone(EGO_DEFAULTS); cfg.enabled = true; cfg.spaceName = `ego-sampling-${Date.now()}`;
+cfg.video.smoothWatch = false;
 const expectedDefaults = structuredClone(cfg.video);
 const bridge = new CliBridge({ cliFile: cfg.cliFile, dataDir: dir, timeoutMs: () => 60000 });
 let delayed = false, finished = false;

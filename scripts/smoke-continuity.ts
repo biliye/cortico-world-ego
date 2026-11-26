@@ -21,6 +21,7 @@ rec.onstop=()=>{clearInterval(draw);const v=document.querySelector('video');v.sr
 });
 await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
 const cfg = structuredClone(EGO_DEFAULTS); cfg.enabled = true; cfg.video.maxFrames = 9;
+cfg.video.smoothWatch = false;
 cfg.spaceName = process.env.CORTICO_EGO_SMOKE_SPACE || `ego-continuity-${Date.now()}`;
 const bridge = new CliBridge({ cliFile: cfg.cliFile, dataDir: dir, timeoutMs: () => 45000 });
 let delayed = false;

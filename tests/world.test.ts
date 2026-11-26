@@ -1003,9 +1003,12 @@ describe('video observation lifetime', () => {
   it('keeps sampling while a scene waits for Bilibili metadata, and flushes partial results on deadline', async () => {
     vi.useFakeTimers();
     const original = browser.run.bind(browser);
+    let polls = 0;
     browser.run = async (op, args) => {
-      if (args.action === 'watch-enrichment') return { spaceId: 1,
-        value: { first: { complete: false, value: { bilibili: { subtitleStatus: 'available' } } } } };
+      if (args.action === 'watch-enrichment') {
+        if (++polls > 1) throw new Error('Optional bridge read temporarily unavailable.');
+        return { spaceId: 1, value: { first: { complete: false, value: { bilibili: { subtitleStatus: 'available' } } } } };
+      }
       const receipt = await original(op, args);
       if (args.action === 'look' && args.batch === 1) receipt.value.enrichmentId = 'first';
       return receipt;
@@ -1018,6 +1021,48 @@ describe('video observation lifetime', () => {
     const scene = await deferred[0].render();
     expect(scene).toMatchObject({ text: expect.stringContaining('"enrichmentIncomplete":true') });
     expect(scene).toMatchObject({ text: expect.stringContaining('"subtitleStatus":"available"') });
+  });
+  it('retries optional metadata after a page evaluation timeout without halting the World', async () => {
+    vi.useFakeTimers();
+    const original = browser.run.bind(browser);
+    let polls = 0;
+    browser.run = async (op, args) => {
+      if (args.action === 'watch-enrichment') {
+        expect(args.spaceId).toBe(1);
+        if (++polls === 1) return { error: 'Page evaluation timed out', code: 'EGO_PAGE_EVALUATION_TIMED_OUT', uncertain: true };
+        return { spaceId: 1, value: { first: { complete: true, value: { bilibili: { subtitleStatus: 'available' } } } } };
+      }
+      const receipt = await original(op, args);
+      if (args.action === 'look') receipt.value.enrichmentId = 'first';
+      return receipt;
+    };
+    await call('video', { page: 'p1', action: 'watch' });
+    await advance(16_500);
+    expect(polls).toBe(1);
+    expect(world.status()).toMatchObject({ halted: false, connected: true, watching: 'p1' });
+    expect(deferred).toHaveLength(0);
+    await advance(1_500);
+    expect(polls).toBe(2);
+    const scene = await deferred[0].render();
+    expect(scene).toMatchObject({ text: expect.stringContaining('"subtitleStatus":"available"') });
+    expect(scene).toMatchObject({ text: expect.not.stringContaining('enrichmentIncomplete') });
+  });
+  it('withdraws optional scenes if an enrichment poll reports that the operator took control', async () => {
+    vi.useFakeTimers();
+    const original = browser.run.bind(browser);
+    browser.run = async (op, args) => {
+      if (args.action === 'watch-enrichment') return { error: 'Operator took control', code: 'EGO_TASK_SPACE_USER_IN_CONTROL' };
+      const receipt = await original(op, args);
+      if (args.action === 'look') receipt.value.enrichmentId = 'first';
+      return receipt;
+    };
+    await call('video', { page: 'p1', action: 'watch' });
+    await advance(18_000);
+    expect(world.status()).toMatchObject({ halted: false, watching: null });
+    expect(deferred).toHaveLength(0);
+    const calls = browser.calls.length;
+    await advance(30_000);
+    expect(browser.calls).toHaveLength(calls);
   });
   it('pauses at a bounded scene backlog and resumes after delivery without resetting collection', async () => {
     cfg.video.smoothWatch = false;

@@ -42,7 +42,9 @@ interface PendingScene {
 }
 const MAX_PENDING_SCENES = 4;
 const VIDEO_ENRICHMENT_POLL_MS = 1500;
+const VIDEO_ENRICHMENT_PROBE_MS = 2000;
 const VIDEO_ENRICHMENT_TIMEOUT_MS = 12_000;
+type VideoEnrichmentResults = Record<string, { complete: boolean; value: Record<string, unknown> } | null>;
 const SPACE_RESET_HINT = 'Old page labels and refs are invalid; use ego_tabs and reopen needed pages. Video watching has not resumed. The failed operation was not replayed.';
 interface SavedState { spaceId?: number; halted: boolean; reason: string; code?: string; spaceMissing?: boolean; uncertain?: boolean; observationTimeout?: boolean; evaluation?: EvaluationTimeout; evaluationRecoveryBlocked?: string; lastUnknownEvaluation?: EvaluationTimeout }
 const UNKNOWN_EVALUATION_HINT = 'The timed-out script outcome remains unknown and it may still have late effects. Do not replay it automatically; inspect the current page and reconcile any submission before continuing. Video watching has not resumed.';
@@ -725,28 +727,40 @@ export class EgoWorld implements World {
   }
   private scheduleVideoEnrichment(watch: Watch): void {
     if (this.enrichmentTimer) return;
-    this.enrichmentTimer = setTimeout(() => {
+    const timer = setTimeout(() => {
       void this.serial(async () => {
-        if (!this.canDeliverVideo(watch)) return;
+        if (this.enrichmentTimer !== timer || !this.canDeliverVideo(watch)) return;
         this.enrichmentTimer = undefined;
         const waiting = [...this.pendingScenes].flatMap(scene => scene.enrichment ? [scene.enrichment.id] : []);
         if (!waiting.length) return;
-        let results: Record<string, { complete: boolean; value: Record<string, unknown> } | null> | undefined;
-        try { results = await this.command('video', { page: watch.page, action: 'watch-enrichment', ids: waiting }); }
-        catch { /* Optional metadata. Command still handles connection, control and uncertain failures. */ }
-        if (!this.canDeliverVideo(watch)) return;
+        const spaceId = this.saved.spaceId;
+        let results: VideoEnrichmentResults | undefined;
+        if (spaceId) {
+          const signal = AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(VIDEO_ENRICHMENT_PROBE_MS)]);
+          // Polling reads optional data. Leave World recovery to foreground operations and sampling.
+          const receipt = await this.bridge.run('video', { spaceId, page: watch.page, action: 'watch-enrichment', ids: waiting }, signal)
+            .then(normalizeFailure, () => undefined);
+          if (!this.canDeliverVideo(watch)) return;
+          if (receipt && (STOP_CODES.test(receipt.code ?? receipt.error ?? '') || (receipt.spaceId && receipt.spaceId !== spaceId))) {
+            this.cancelWatch();
+            await this.event('video.state', 'Video observation stopped: the original Space is unavailable or no longer under agent control.', true);
+            return;
+          }
+          if (receipt?.spaceId === spaceId && !receipt.error && !receipt.code && !receipt.uncertain) results = receipt.value;
+        }
         for (const scene of this.pendingScenes) {
           if (!scene.enrichment || !scene.value) continue;
           const result = results?.[scene.enrichment.id];
-          if (result && !result.complete && Date.now() < scene.enrichment.expiresAt) continue;
           Object.assign(scene.value, result?.value);
+          if (result !== null && !result?.complete && Date.now() < scene.enrichment.expiresAt) continue;
           if (!result?.complete) scene.value.enrichmentIncomplete = true;
           scene.enrichment = undefined;
         }
         this.flushVideoScenes(watch);
       });
     }, VIDEO_ENRICHMENT_POLL_MS);
-    this.enrichmentTimer.unref?.();
+    this.enrichmentTimer = timer;
+    timer.unref?.();
   }
   private async resumeAfterDelivery(watch: Watch): Promise<void> {
     if (!this.running || this.saved.halted || this.watch !== watch || !watch.backpressured || this.pendingScenes.size >= MAX_PENDING_SCENES) return;

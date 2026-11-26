@@ -28,3 +28,16 @@ it('keeps a missing executable classified as a pre-execution setup failure', asy
   vi.mocked(spawn).mockImplementation(() => { queueMicrotask(() => child.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }))); return child as any; });
   expect(await new CliBridge({ cliFile: 'fixture.exe', dataDir: dir, timeoutMs: () => 1000 }).run('tabs', {})).toMatchObject({ code: 'EGO_CLI_NOT_FOUND', uncertain: false });
 });
+it.each([
+  [3, 'Failed to start ego lite: cannot find the app for launcher.exe.', 'EGO_APP_NOT_FOUND', false],
+  [3, 'Launcher diagnostic\r\n  Failed to start ego lite: cannot find the app for launcher.exe.', 'EGO_APP_NOT_FOUND', false],
+  [3, 'Browser command terminated without a result.', undefined, true],
+  [1, 'Failed to start ego lite: cannot find the app for launcher.exe.', undefined, true],
+])('classifies launcher exit %s with stderr %s', async (exitCode, message, code, uncertain) => {
+  vi.mocked(spawn).mockImplementation(() => {
+    queueMicrotask(() => { child.emit('spawn'); child.stderr.emit('data', message); child.emit('close', exitCode); });
+    return child as any;
+  });
+  const result = await new CliBridge({ cliFile: 'fixture.exe', dataDir: dir, timeoutMs: () => 1000 }).run('connect', {});
+  expect(result).toMatchObject({ error: `ego-browser exited ${exitCode}: ${message}`, code, uncertain });
+});

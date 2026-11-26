@@ -61,6 +61,99 @@ it('returns stable control-stop codes to the World', async () => {
   const result = await execute({ operation: 'tabs', args: {} });
   expect(result.code).toBe('EGO_TASK_SPACE_USER_IN_CONTROL');
 });
+it('checks playback in the specified Space without capturing or touching player state', async () => {
+  const video = { tagName: 'VIDEO', paused: false, ended: false,
+    get textTracks() { throw new Error('The playback probe must not load tracks.'); } };
+  const select = vi.fn(async () => task);
+  vi.stubGlobal('taskSpace', select);
+  page.cdp = vi.fn(async (method: string, params: any) => {
+    if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'parent' } } };
+    if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
+    if (method !== 'Runtime.evaluate') throw new Error(`Unexpected CDP call: ${method}`);
+    const context = { document: { querySelectorAll: () => [video] } };
+    const value = await runInNewContext(params.expression, context);
+    expect(context).not.toHaveProperty('__corticoEgoVideo');
+    return { result: { value } };
+  });
+  const playback = [{ page: 'p1', frameId: 'parent' }, { page: 'p2' }];
+  expect((await execute({ operation: 'tabs', args: { playback, spaceName: 'dedicated-name' } })).error).toContain('existing Space id');
+  expect(select).not.toHaveBeenCalled();
+  expect(await execute({ operation: 'tabs', args: { playback, spaceId: 1 } })).toEqual({ spaceId: 1, value: { playing: [true, false] } });
+  expect(select).toHaveBeenLastCalledWith(1);
+  video.ended = true;
+  expect(await execute({ operation: 'tabs', args: { playback, spaceId: 1 } })).toEqual({ spaceId: 1, value: { playing: [false, false] } });
+});
+it.each([-32000, 'EGO_TASK_PAGE_TIMEOUT'])('isolates a playback error with code %s but still reports loss of control for the Space', async code => {
+  const controlError = Object.assign(new Error('user took control'), { code: 'EGO_TASK_SPACE_USER_IN_CONTROL' });
+  const failingPage = { cdp: vi.fn().mockRejectedValue(Object.assign(new Error('Frame unavailable'), { code })) };
+  task.tabs = async () => [{ label: 'p1' }, { label: 'p2' }];
+  task.page = (label: string) => label === 'p1' ? failingPage : page;
+  page.cdp = vi.fn(async (method: string) => {
+    if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'parent' } } };
+    if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
+    return { result: { value: { found: true, playing: true } } };
+  });
+  const args = { spaceId: 1, playback: [{ page: 'p1' }, { page: 'p2' }] };
+  expect(await execute({ operation: 'tabs', args })).toEqual({ spaceId: 1, value: { playing: [null, true] } });
+  failingPage.cdp.mockRejectedValueOnce(controlError);
+  page.cdp.mockClear();
+  expect(await execute({ operation: 'tabs', args })).toMatchObject({ code: 'EGO_TASK_SPACE_USER_IN_CONTROL' });
+  expect(page.cdp).not.toHaveBeenCalled();
+});
+it('returns an iframe playback timeout beside the result for a healthy target', async () => {
+  vi.useFakeTimers();
+  try {
+    page.events = async () => [];
+    const healthyPage = { cdp: vi.fn(async (method: string) => {
+      if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'healthy' } } };
+      if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
+      return { result: { value: { found: true, playing: true } } };
+    }) };
+    task.tabs = async () => [{ label: 'p1' }, { label: 'p2' }];
+    task.page = (label: string) => label === 'p1' ? page : healthyPage;
+    const check = execute({ operation: 'tabs', args: { spaceId: 1, playback: [{ page: 'p1' }, { page: 'p2' }] } });
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(healthyPage.cdp).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(healthyPage.cdp).toHaveBeenCalled();
+    await expect(check).resolves.toEqual({ spaceId: 1, value: { playing: [null, true] } });
+    expect(calls.filter(call => call.method === 'Target.detachFromTarget')).toHaveLength(1);
+  } finally { vi.useRealTimers(); }
+});
+it.each([
+  { video: true, frameId: undefined, result: true, visited: ['hung-child', 'video-child'] },
+  { video: false, frameId: undefined, result: null, visited: ['hung-child', 'video-child'] },
+  { video: true, frameId: 'video-child', result: true, visited: ['video-child'] },
+])('checks same-page iframes with a timeout and frame hint $frameId, returning $result', async ({ video, frameId, result, visited }) => {
+  vi.useFakeTimers();
+  try {
+    task.cdp = vi.fn(async () => ({ targetInfos: ['hung-child', 'video-child'].map(targetId => ({ targetId, parentId: 'parent' })) }));
+    const attached: string[] = [], detached: string[] = [];
+    page.cdp = vi.fn(async (method: string, params: any, options: any) => {
+      if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'parent' } } };
+      if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
+      if (method === 'Runtime.evaluate') return { result: { value: { found: false } } };
+      if (method === 'Target.attachToTarget') { attached.push(params.targetId); return { sessionId: params.targetId }; }
+      if (method === 'Target.detachFromTarget') { detached.push(params.sessionId); return {}; }
+      expect(method).toBe('Target.sendMessageToTarget');
+      expect(options.timeout).toBeGreaterThan(0);
+      expect(options.timeout).toBeLessThanOrEqual(2000);
+      if (params.sessionId !== 'hung-child') {
+        const message = JSON.parse(params.message);
+        const childResult = message.method === 'Page.getFrameTree' ? { frameTree: { frame: { id: 'video-child' } } }
+          : message.method === 'Page.createIsolatedWorld' ? { executionContextId: 2 }
+          : { result: { value: { found: video, playing: video } } };
+        pending.push({ method: 'Target.receivedMessageFromTarget', params: { sessionId: params.sessionId, message: JSON.stringify({ id: message.id, result: childResult }) } });
+      }
+      return {};
+    });
+    const check = execute({ operation: 'tabs', args: { spaceId: 1, playback: [{ page: 'p1', frameId }] } });
+    await vi.advanceTimersByTimeAsync(2000);
+    await expect(check).resolves.toEqual({ spaceId: 1, value: { playing: [result] } });
+    expect(attached).toEqual(visited);
+    expect(detached).toEqual(visited);
+  } finally { vi.useRealTimers(); }
+});
 it('observes delegated control without selecting a page, claiming or taking over', async () => {
   const select = vi.fn(async () => task), takeover = vi.fn(), claim = vi.fn();
   vi.stubGlobal('taskSpace', select); vi.stubGlobal('takeOverTaskSpace', takeover); vi.stubGlobal('claimTaskSpace', claim);

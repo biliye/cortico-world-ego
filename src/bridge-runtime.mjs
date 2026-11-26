@@ -5,15 +5,24 @@ import { bilibiliComments } from './bilibili-comments.mjs';
 import { downloadFile, uploadFile } from './file-transfer.mjs';
 import { readFile } from 'node:fs/promises';
 
+const PLAYBACK_IFRAME_BUDGET_MS = 2000;
+
 function errorCode(error) {
   for (let e = error, i = 0; e && i < 5; e = e.cause, i++) {
     if (e.error_code || e.code) return e.error_code || e.code;
   }
   return String(error).match(/EGO_[A-Z_]+/)?.[0];
 }
+function isPlaybackSpaceFailure(error) {
+  return /^EGO_TASK_(SPACE_|HOST_)/.test(errorCode(error) ?? '') || /^task space not found:\s*\d+\s*$/i.test(error.message);
+}
 export async function execute({ operation, args }) {
   let task;
   try {
+    const checkPlayback = operation === 'tabs' && Array.isArray(args.playback);
+    if (checkPlayback && (!Number.isSafeInteger(args.spaceId) || args.spaceId <= 0)) {
+      throw new Error('Playback check requires an existing Space id.');
+    }
     if (operation === 'control-status') {
       // Observe the same existing Space. Never claim, take over, or create one.
       if (!Number.isSafeInteger(args.spaceId) || args.spaceId <= 0) throw new Error('Control check requires an existing Space id.');
@@ -36,7 +45,23 @@ export async function execute({ operation, args }) {
     }
     let value;
     if (operation === 'connect' || operation === 'resume') value = { name: task.name, pages: await inventory(task) };
-    else if (operation === 'tabs') value = await inventory(task);
+    else if (operation === 'tabs') {
+      const pages = await inventory(task);
+      if (checkPlayback) {
+        const labels = new Set(pages.map(page => page.page));
+        const playing = [];
+        for (const target of args.playback) {
+          try {
+            const state = labels.has(target.page) && await runVideo(task, task.page(target.page), { ...target, action: 'playback-status' });
+            playing.push(state?.playing === true);
+          } catch (error) {
+            if (isPlaybackSpaceFailure(error)) throw error;
+            playing.push(null);
+          }
+        }
+        value = { playing };
+      } else value = pages;
+    }
     else if (operation === 'handoff') { await task.handOff(); value = { handedOff: true }; }
     else if (operation === 'finish') { value = await task.finish({ keep: [] }); }
     else if (operation === 'open') {
@@ -109,6 +134,7 @@ async function capturePage(task, page, args) {
   return { image: { base64: (await readFile(args.screenshotFile)).toString('base64'), mime: 'image/png' }, restoredWindow };
 }
 async function runVideo(task, page, args) {
+  const checkingPlayback = args.action === 'playback-status';
   const cdp = (method, params) => page.cdp(method, params);
   let state = await scanVideo(cdp, args);
   if (!state) {
@@ -120,18 +146,39 @@ async function runVideo(task, page, args) {
     for (let pass = 0; pass <= targetInfos.length; pass++) {
       for (const target of targetInfos) if (owned.has(target.parentId) && !owned.has(target.targetId)) { owned.add(target.targetId); descendants.push(target); }
     }
+    // A previously located OOPIF can usually be addressed by its frame id.
+    if (checkingPlayback && args.frameId) {
+      descendants.sort((first, second) => Number(second.targetId === args.frameId) - Number(first.targetId === args.frameId));
+    }
+    let uncheckedFrameError;
     for (const target of descendants) {
-      const { sessionId } = await page.cdp('Target.attachToTarget', { targetId: target.targetId, flatten: false });
+      let sessionId;
       let canDetach = true;
-      try { state = await scanVideo((method, params) => childCdp(page, sessionId, method, params), args); }
-      catch (error) {
-        if (errorCode(error)?.startsWith('EGO_TASK_') || error.mayHaveLateEffects) canDetach = false;
+      try {
+        const iframeDeadline = checkingPlayback ? Date.now() + PLAYBACK_IFRAME_BUDGET_MS : Infinity;
+        const attachOptions = checkingPlayback ? { timeout: PLAYBACK_IFRAME_BUDGET_MS } : undefined;
+        ({ sessionId } = await page.cdp('Target.attachToTarget', { targetId: target.targetId, flatten: false }, attachOptions));
+        state = await scanVideo((method, params) => childCdp(page, sessionId, method, params, iframeDeadline), args);
+      } catch (error) {
+        if (checkingPlayback && !isPlaybackSpaceFailure(error)) {
+          uncheckedFrameError ??= error;
+          continue;
+        }
+        canDetach = !checkingPlayback && !String(errorCode(error) ?? '').startsWith('EGO_TASK_') && !error.mayHaveLateEffects;
         throw error;
-      } finally { if (canDetach) await page.cdp('Target.detachFromTarget', { sessionId }); }
+      } finally {
+        if (sessionId && canDetach) {
+          const detachOptions = checkingPlayback ? { timeout: PLAYBACK_IFRAME_BUDGET_MS } : undefined;
+          try { await page.cdp('Target.detachFromTarget', { sessionId }, detachOptions); }
+          catch (error) { if (!checkingPlayback || isPlaybackSpaceFailure(error)) throw error; }
+        }
+      }
       if (state) break;
     }
+    if (!state && uncheckedFrameError) throw uncheckedFrameError;
   }
   if (!state) {
+    if (checkingPlayback) return { found: false, playing: false };
     if (args.frameId) throw new Error('Video frame no longer exists or contains no matching video. Inspect again without frameId.');
     return { found: false, message: 'No HTML5 video found in accessible frames. The player may still be loading or use a different media surface.' };
   }
@@ -153,19 +200,23 @@ async function runVideo(task, page, args) {
   return state;
 }
 let childMessageId = 1;
-async function childCdp(page, sessionId, method, params) {
-  const id = childMessageId++;
-  await page.cdp('Target.sendMessageToTarget', { sessionId, message: JSON.stringify({ id, method, params }) });
-  const deadline = Date.now() + 12000;
-  while (Date.now() < deadline) {
-    for (const event of await page.events()) {
-      if (event.method !== 'Target.receivedMessageFromTarget' || event.params?.sessionId !== sessionId) continue;
-      const message = JSON.parse(event.params.message);
-      if (message.id !== id) continue;
-      if (message.error) throw new Error(message.error.message);
-      return message.result;
+async function childCdp(page, sessionId, method, params, iframeDeadline) {
+  const remaining = iframeDeadline - Date.now();
+  if (remaining > 0) {
+    const id = childMessageId++;
+    const options = Number.isFinite(remaining) ? { timeout: remaining } : undefined;
+    await page.cdp('Target.sendMessageToTarget', { sessionId, message: JSON.stringify({ id, method, params }) }, options);
+    const deadline = Math.min(Date.now() + 12000, iframeDeadline);
+    while (Date.now() < deadline) {
+      for (const event of await page.events()) {
+        if (event.method !== 'Target.receivedMessageFromTarget' || event.params?.sessionId !== sessionId) continue;
+        const message = JSON.parse(event.params.message);
+        if (message.id !== id) continue;
+        if (message.error) throw new Error(message.error.message);
+        return message.result;
+      }
+      await new Promise(resolve => setTimeout(resolve, 20));
     }
-    await new Promise(resolve => setTimeout(resolve, 20));
   }
   throw Object.assign(new Error(`Iframe CDP ${method} timed out; it may have late effects.`), { mayHaveLateEffects: true });
 }

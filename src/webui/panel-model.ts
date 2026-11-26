@@ -50,6 +50,9 @@ export function panelView(status: EgoPanelStatus, zh = true) {
     detail = say('将连接方式改为「自动选择」或「普通权限助手」，再重启这个 World；宿主可继续保留管理员权限。', 'Choose Automatic or Helper mode, then restart this World. The host can stay elevated.');
   } else if (status.code === 'EGO_CLI_NOT_FOUND') {
     title = say('未找到 ego-browser', 'ego-browser was not found'); detail = say('在配置中填写 ego-browser 可执行文件的完整路径。使用助手时，先停止助手，再重新生成并运行启动脚本。', 'Set the full ego-browser executable path. When using the helper, stop it, regenerate and run its launcher.');
+  } else if (status.code === 'EGO_APP_NOT_FOUND') {
+    title = say('启动器未找到 Ego Lite', 'The launcher could not find Ego Lite');
+    detail = say('请确认 Ego Lite 已安装，手动打开后再连接浏览器。', 'Check that Ego Lite is installed, open it manually, then retry the connection.');
   } else if (needsHelper && !status.helperOnline) {
     title = say('需要启动普通权限助手', 'Start the ordinary-permission helper');
     detail = say('宿主可继续使用管理员权限。Ego 的连接由普通权限助手执行。', 'The host can stay elevated. The helper runs Ego commands without elevation.');

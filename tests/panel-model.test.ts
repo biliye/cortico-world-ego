@@ -11,6 +11,12 @@ it('offers control return only for a real pause and connection retry only for co
   const view = panelView({ ...base, halted: true, code: 'EGO_TASK_SPACE_USER_IN_CONTROL' });
   expect(view.canResume).toBe(true); expect(view.canConnect).toBe(false);
 });
+it('reports the launcher failure in both direct and helper modes', () => {
+  const status = { ...base, code: 'EGO_APP_NOT_FOUND' };
+  expect(panelView(status)).toMatchObject({ title: '启动器未找到 Ego Lite', canConnect: true, canResume: false });
+  expect(panelView({ ...status, transport: 'helper', helperOnline: true })).toMatchObject({ title: '启动器未找到 Ego Lite', canConnect: true, canResume: false });
+  expect(panelView({ ...status, transport: 'helper' }, false)).toMatchObject({ title: 'The launcher could not find Ego Lite', canConnect: false });
+});
 it('shows video controls only while watching and supports English status text', () => {
   expect(panelView({ ...base, connected: true }).canPause).toBe(false);
   expect(panelView({ ...base, connected: true, watching: 'p1' }).canPause).toBe(true);

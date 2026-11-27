@@ -5,9 +5,14 @@ export async function douyinDanmaku({ time, since }, select) {
   if (!itemId) return { ...base, status: 'unavailable', reason: 'missing-douyin-video-id' };
 
   const from = Math.floor(since * 1000), to = Math.floor(time * 1000);
+  const now = Date.now();
+  const cacheUntil = now + 60000;
   let cache = window.__corticoEgoDouyinDanmaku;
-  if (cache?.itemId !== itemId) cache = window.__corticoEgoDouyinDanmaku = { itemId, requests: new Map() };
-  const requests = new Map();
+  if (cache?.itemId !== itemId || !cache.windows) {
+    cache = window.__corticoEgoDouyinDanmaku = { itemId, windows: new Map(), requests: new Map() };
+  }
+  for (const [key, entry] of cache.windows) if (entry.until <= now) cache.windows.delete(key);
+  // Retain observed windows even after their entries disappear from Resource Timing.
   for (const resource of performance.getEntriesByType('resource')) {
     try {
       const url = new URL(resource.name);
@@ -17,15 +22,20 @@ export async function douyinDanmaku({ time, since }, select) {
       const startValue = url.searchParams.get('start_time'), endValue = url.searchParams.get('end_time');
       if (!/^\d+$/.test(startValue ?? '') || !/^\d+$/.test(endValue ?? '')) continue;
       const start = Number(startValue), end = Number(endValue);
-      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || end < from || start > to) continue;
-      requests.set(`${start}:${end}`, { start, end, url: url.href });
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end) continue;
+      const key = `${start}:${end}`;
+      cache.windows.delete(key);
+      cache.windows.set(key, { start, end, url: url.href, until: cacheUntil });
     } catch { /* unrelated resource */ }
   }
-  const windows = [...requests.values()].sort((a, b) => a.start - b.start || b.end - a.end);
+  const windows = [...cache.windows.values()].filter(window => window.end >= from && window.start <= to)
+    .sort((a, b) => a.start - b.start || b.end - a.end);
+  while (cache.windows.size > 64) cache.windows.delete(cache.windows.keys().next().value);
   if (!windows.length) return { ...base, itemId, status: 'unavailable', reason: 'no-observed-danmaku-window' };
 
-  const now = Date.now();
-  const results = await Promise.allSettled(windows.slice(0, 4).map(async ({ start, end, url }) => {
+  const requested = windows.slice(0, 4);
+  const windowLimit = requested.length < windows.length ? { windows: { observed: windows.length, used: requested.length } } : {};
+  const results = await Promise.allSettled(requested.map(async ({ start, end, url }) => {
     const cached = cache.requests.get(url);
     if (cached && now < cached.until) return cached.result;
     // Keep the exact observed URL, including the player's parameters.
@@ -53,7 +63,7 @@ export async function douyinDanmaku({ time, since }, select) {
       return { start: coveredStart, end: coveredEnd, lines: lines.filter(line => line.time * 1000 >= coveredStart - 0.01 &&
         line.time * 1000 <= coveredEnd + 0.01) };
     })();
-    cache.requests.set(url, { until: now + 60000, result });
+    cache.requests.set(url, { until: cacheUntil, result });
     while (cache.requests.size > 6) cache.requests.delete(cache.requests.keys().next().value);
     try { return await result; }
     catch (error) {
@@ -67,7 +77,7 @@ export async function douyinDanmaku({ time, since }, select) {
     const window = result.value;
     return Math.max(window.start, from) <= Math.min(window.end, to) ? [window] : [];
   });
-  if (!covered.length) return { ...base, itemId, status: 'unavailable', ...(errors.length && { errors }) };
+  if (!covered.length) return { ...base, itemId, status: 'unavailable', ...windowLimit, ...(errors.length && { errors }) };
   let coveredThrough = from - 1;
   for (const window of covered.sort((a, b) => a.start - b.start)) {
     if (window.start > coveredThrough + 1) break;
@@ -75,5 +85,5 @@ export async function douyinDanmaku({ time, since }, select) {
   }
   const selected = select(covered.flatMap(window => window.lines.filter(line => line.time >= since && line.time <= time)));
   return { ...base, ...selected, itemId, status: coveredThrough >= Math.max(from, to - 1) && !errors.length ? 'available' : 'partial',
-    ...(errors.length && { errors }) };
+    ...windowLimit, ...(errors.length && { errors }) };
 }

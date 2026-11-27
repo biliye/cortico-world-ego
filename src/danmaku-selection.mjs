@@ -15,6 +15,7 @@ export function selectDanmaku(lines) {
   }
 
   const buckets = [...seconds.values()].map(texts => [...texts.values()].sort(rank));
+  const uniqueTextInRange = buckets.reduce((total, rows) => total + rows.length, 0);
   const limit = 12;
   const spread = rows => rows.length <= limit ? rows
     : Array.from({ length: limit }, (_, index) => rows[Math.round(index * (rows.length - 1) / (limit - 1))]);
@@ -32,6 +33,11 @@ export function selectDanmaku(lines) {
     }
   }
 
-  return { totalInRange: unique.length, comments: comments.sort((a, b) => a.time - b.time), truncated: unique.length > comments.length,
-    likesStatus: !likesKnown ? 'unavailable' : likesKnown === unique.length ? 'available' : 'partial' };
+  return {
+    totalInRange: unique.length,
+    uniqueTextInRange,
+    comments: comments.sort((a, b) => a.time - b.time),
+    truncated: uniqueTextInRange > comments.length,
+    ...(unique.length > 0 && { likesStatus: !likesKnown ? 'unavailable' : likesKnown === unique.length ? 'available' : 'partial' }),
+  };
 }

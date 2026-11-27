@@ -44,8 +44,8 @@ export function decodeDanmakuSegment(buf) {
   return out;
 }
 
-/** Serialized into the Bilibili page, with the standalone decoder as its second argument. */
-export async function bilibiliDanmaku({ time, since }, decode) {
+/** Serialized into the Bilibili page with the standalone decoder and selection function. */
+export async function bilibiliDanmaku({ time, since }, decode, select) {
   const info = window.__INITIAL_STATE__?.videoData ?? window.__INITIAL_STATE__?.epInfo;
   const part = Number(new URL(location.href).searchParams.get('p') ?? 1);
   const cid = info?.pages?.[part - 1]?.cid ?? info?.cid ?? window.__INITIAL_STATE__?.cid;
@@ -65,24 +65,45 @@ export async function bilibiliDanmaku({ time, since }, decode) {
     } catch { /* unrelated resource */ }
   }
   const first = Math.floor(since / 360) + 1, last = Math.floor(time / 360) + 1;
-  const errors = [], list = [], now = Date.now();
-  for (let index = Math.max(first, last - 1); index <= last; index++) {
-    try {
-      let saved = cache.segments.get(index);
-      if (!saved || now - saved.at > 60000) {
-        if (!urls.has(index)) throw new Error(`Danmaku segment ${index} has not been observed in this page`);
-        const response = await fetch(urls.get(index), { credentials: 'include', signal: AbortSignal.timeout(6000) });
-        if (!response.ok) throw new Error(`Danmaku HTTP ${response.status}`);
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        if (bytes.length > 3 * 1024 * 1024) throw new Error('Danmaku segment exceeds 3 MiB');
-        saved = { at: now, lines: decode(bytes) }; cache.segments.set(index, saved);
-      }
-      list.push(...saved.lines.filter(l => l.time >= since && l.time <= time));
-    } catch (error) { errors.push(error.message); }
-  }
+  const now = Date.now();
+  const indices = first < last ? [last - 1, last] : [last];
+  const segments = await Promise.allSettled(indices.map(async index => {
+    let saved = cache.segments.get(index);
+    if (!saved || now - saved.at > 60000) {
+      if (!urls.has(index)) throw new Error(`Danmaku segment ${index} has not been observed in this page`);
+      const response = await fetch(urls.get(index), { credentials: 'include', signal: AbortSignal.timeout(6000) });
+      if (!response.ok) throw new Error(`Danmaku HTTP ${response.status}`);
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.length > 3 * 1024 * 1024) throw new Error('Danmaku segment exceeds 3 MiB');
+      saved = { at: now, lines: decode(bytes) };
+      cache.segments.set(index, saved);
+    }
+    return saved.lines.filter(l => l.time >= since && l.time <= time);
+  }));
   for (const key of cache.segments.keys()) if (key < last - 1 || key > last) cache.segments.delete(key);
-  const unique = [...new Map(list.map(l => [l.id, l])).values()].sort((a, b) => a.time - b.time);
-  const comments = unique.length <= 12 ? unique : Array.from({ length: 12 }, (_, i) => unique[Math.round(i * (unique.length - 1) / 11)]);
-  return { ...base, cid, status: errors.length ? unique.length ? 'partial' : 'unavailable' : 'available',
-    totalInRange: unique.length, comments, truncated: unique.length > comments.length || first < last - 1, ...(errors.length ? { errors } : {}) };
+  const errors = segments.flatMap(segment => segment.status === 'rejected' ? [segment.reason.message] : []);
+  const lines = segments.flatMap(segment => segment.status === 'fulfilled' ? segment.value : []);
+  const sorted = [...new Map(lines.map(line => [line.id, line])).values()].sort((a, b) => a.time - b.time);
+  const ids = sorted.filter(line => /^[1-9]\d{0,18}$/.test(line.id)).map(line => line.id);
+  // Bound the extra traffic for dense windows while retaining candidates throughout the clip.
+  const candidates = ids.length <= 80 ? ids
+    : Array.from({ length: 80 }, (_, index) => ids[Math.round(index * (ids.length - 1) / 79)]);
+  const likes = new Map();
+  const lookupLikes = async batch => {
+    const url = new URL('https://api.bilibili.com/x/v2/dm/thumbup/stats');
+    url.searchParams.set('oid', String(cid));
+    url.searchParams.set('ids', batch.join(','));
+    const response = await fetch(url.href, { credentials: 'include', redirect: 'error', signal: AbortSignal.timeout(2200) });
+    if (!response.ok) return;
+    const result = await response.json();
+    if (result?.code !== 0) return;
+    for (const id of batch) {
+      const count = result.data?.[id]?.likes;
+      if (Number.isSafeInteger(count) && count >= 0) likes.set(id, count);
+    }
+  };
+  await Promise.allSettled([candidates.slice(0, 40), candidates.slice(40)].filter(batch => batch.length).map(lookupLikes));
+  const selected = select(sorted.map(line => likes.has(line.id) ? { ...line, likes: likes.get(line.id) } : line));
+  return { ...base, ...selected, cid, status: errors.length ? lines.length ? 'partial' : 'unavailable' : 'available',
+    truncated: selected.truncated || first < last - 1, ...(errors.length ? { errors } : {}) };
 }

@@ -31,14 +31,14 @@ export const EGO: WorldDefinition<EgoConfigSection> = {
       ego_shot: { zh: '获取网页当前视口的图片附件。', en: 'Capture the page viewport as an attachment.' },
       ego_close: { zh: '关闭 bot 创建的页面。', en: 'Close an agent-created page.' },
       ego_handoff: { zh: '将 Space 交给操作员并停止操作。', en: 'Hand control to the operator and stop commands.' },
-      ego_video: { zh: 'look 取当前画面；watch 按段采多帧合一图，读取字幕与 B 站弹幕文字。', en: 'look captures now; watch samples interval mosaics with subtitles and Bilibili danmaku text.' },
+      ego_video: { zh: 'look 取当前画面。watch 按段采帧，附上可用字幕和弹幕文字。tune 可调整采样和弹幕开关。', en: 'look captures now. watch delivers scene mosaics with available subtitles and danmaku. tune changes sampling or danmaku.' },
       ego_bilibili: { zh: '搜索 B 站视频、查看推荐与评论。', en: 'Search Bilibili, list related videos and comments.' },
       ego_search: { zh: '搜索网页或查询梗的含义与出处。', en: 'Search the web or find evidence for a meme’s meaning and origin.' },
     }),
     events: [
       { type: 'ego.state', description: { zh: '连接、接管或恢复状态。', en: 'Connection, control handoff or resume state.' } },
       { type: 'ego.video.state', description: { zh: '视频播放与观看状态。', en: 'Playback and observation state.' } },
-      { type: 'ego.video.scene', description: { zh: '显式观看期间每段时间的多帧拼图、可用字幕与 B 站弹幕文字。', en: 'Multi-frame interval mosaics, available subtitles and Bilibili danmaku text during explicit watching.' } },
+      { type: 'ego.video.scene', description: { zh: '显式观看期间每段时间的多帧拼图、可用字幕与弹幕文字。', en: 'Multi-frame interval mosaics, available subtitles and danmaku text during explicit watching.' } },
     ],
   },
 };

@@ -8,7 +8,7 @@ export function frameCount(windowSec: number, frameIntervalSec: number): number 
   return Math.ceil(windowSec / frameIntervalSec - 1e-9) + 1;
 }
 export function samplingOverride(args: Record<string, unknown>): SamplingOverride | undefined {
-  if (args.windowSec === undefined && args.frameIntervalSec === undefined && args.action !== 'tune') return;
+  if (args.windowSec === undefined && args.frameIntervalSec === undefined && (args.action !== 'tune' || typeof args.danmaku === 'boolean')) return;
   if (!['watch', 'tune'].includes(String(args.action))) throw new Error('Sampling parameters are supported only by watch and tune.');
   const { windowSec, frameIntervalSec } = args;
   if (typeof windowSec !== 'number' || !Number.isFinite(windowSec) || windowSec < 10 || windowSec > 120) throw new Error('windowSec must be a finite number from 10 to 120; provide both sampling parameters.');
@@ -16,12 +16,12 @@ export function samplingOverride(args: Record<string, unknown>): SamplingOverrid
   if (frameCount(windowSec, frameIntervalSec) > 9) throw new Error(`Sampling exceeds 9 frames. Increase frameIntervalSec to at least ${windowSec / 8} seconds, or reduce windowSec.`);
   return { windowSec, frameIntervalSec };
 }
-export function samplingPlan(cfg: EgoConfigSection, override?: SamplingOverride): SamplingPlan {
+export function samplingPlan(cfg: EgoConfigSection, override?: SamplingOverride, danmaku = cfg.video.danmaku !== false): SamplingPlan {
   const windowSec = bounded(cfg.video.intervalMs, 10000, 120000, 15000) / 1000;
   const plannedFrames = bounded(cfg.video.maxFrames, 1, 9, 4);
   return { windowSec, frameIntervalSec: windowSec / Math.max(1, plannedFrames - 1), plannedFrames,
     ...override, ...(override ? { plannedFrames: frameCount(override.windowSec, override.frameIntervalSec) } : {}),
-    frameWidth: bounded(cfg.video.frameWidth, 240, 1280, 640), danmaku: cfg.video.danmaku !== false };
+    frameWidth: bounded(cfg.video.frameWidth, 240, 1280, 640), danmaku };
 }
 export function captureOptions(plan: SamplingPlan) {
   return { maxFrames: plan.plannedFrames, frameWidth: plan.frameWidth, windowMs: plan.windowSec * 1000, danmaku: plan.danmaku };
@@ -30,5 +30,5 @@ export function targetOffset(plan: SamplingPlan, index: number): number {
   return plan.plannedFrames === 1 ? plan.windowSec : Math.min(index * plan.frameIntervalSec, plan.windowSec);
 }
 export function samplingSummary(plan: SamplingPlan) {
-  return { windowSec: plan.windowSec, frameIntervalSec: plan.frameIntervalSec, plannedFrames: plan.plannedFrames };
+  return { windowSec: plan.windowSec, frameIntervalSec: plan.frameIntervalSec, plannedFrames: plan.plannedFrames, danmaku: plan.danmaku };
 }

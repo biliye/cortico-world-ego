@@ -5,8 +5,8 @@ export default { panels: { control: { mount }, search: searchPanel } } satisfies
 export function mount(ctx: WebUiPanelContext): void {
   const ui = ctx.ui, zh = ctx.language.startsWith('zh');
   const say = (cn: string, en: string) => zh ? cn : en;
-  const samplingText = (plan: { windowSec: number; frameIntervalSec: number; plannedFrames: number }) =>
-    `${say('窗口', 'Window')} ${plan.windowSec}s · ${say('帧距', 'Gap')} ${Number(plan.frameIntervalSec.toFixed(3))}s · ${plan.plannedFrames}${say(' 帧', ' frames')}`;
+  const samplingText = (plan: NonNullable<EgoPanelStatus['sampling']>['current']) =>
+    `${say('窗口', 'Window')} ${plan.windowSec}s · ${say('帧距', 'Gap')} ${Number(plan.frameIntervalSec.toFixed(3))}s · ${plan.plannedFrames}${say(' 帧', ' frames')} · ${plan.danmaku ? say('弹幕文字开', 'Danmaku on') : say('弹幕文字关', 'Danmaku off')}`;
   const connection = ui.sheet({ title: say('浏览器连接', 'Browser connection') });
   const heading = ui.h('h3', null, say('正在读取状态…', 'Reading status…'));
   heading.setAttribute('role', 'status');

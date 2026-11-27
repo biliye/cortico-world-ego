@@ -127,3 +127,10 @@ it('reports the Douyin window limit when it leaves part of the requested interva
   expect(result).not.toHaveProperty('errors');
   expect(fetch).toHaveBeenCalledTimes(4);
 });
+it('omits the Douyin window limit when the requested interval is covered', async () => {
+  const observed = [douyinUrl(0, 20000), douyinUrl(0, 10000), douyinUrl(0, 5000), douyinUrl(5000, 15000), douyinUrl(10000, 20000)];
+  douyinFixture(observed);
+  const result = await douyinDanmaku({ since: 0, time: 20 }, selectDanmaku);
+  expect(result.status).toBe('available');
+  expect(result).not.toHaveProperty('windows');
+});

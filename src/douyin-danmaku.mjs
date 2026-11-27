@@ -84,6 +84,6 @@ export async function douyinDanmaku({ time, since }, select) {
     coveredThrough = Math.max(coveredThrough, window.end);
   }
   const selected = select(covered.flatMap(window => window.lines.filter(line => line.time >= since && line.time <= time)));
-  return { ...base, ...selected, itemId, status: coveredThrough >= Math.max(from, to - 1) && !errors.length ? 'available' : 'partial',
-    ...windowLimit, ...(errors.length && { errors }) };
+  const status = coveredThrough >= Math.max(from, to - 1) && !errors.length ? 'available' : 'partial';
+  return { ...base, ...selected, itemId, status, ...(status === 'partial' && windowLimit), ...(errors.length && { errors }) };
 }

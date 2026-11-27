@@ -211,7 +211,28 @@ describe('per-watch video-time sampling', () => {
     expect(second.observation).toMatchObject({ batch: 2, windowSec: 10, plannedFrames: 3 });
     expect(cfg).toEqual(EGO_DEFAULTS);
     await call('video', { page: 'p1', action: 'watch' });
-    expect(world.status().sampling?.current).toEqual({ windowSec: 15, frameIntervalSec: 5, plannedFrames: 4 });
+    expect(world.status().sampling?.current).toEqual({ windowSec: 15, frameIntervalSec: 5, plannedFrames: 4, danmaku: true });
+  });
+  it('lets the agent toggle a watch and override a single look without editing host defaults', async () => {
+    vi.useFakeTimers(); videoFixture();
+    cfg.video.danmaku = false;
+    expect((await call('video', { page: 'p1', action: 'watch', danmaku: true, windowSec: 10, frameIntervalSec: 5 })).failed).toBeUndefined();
+    expect((await call('video', { page: 'p1', action: 'look', danmaku: false })).failed).toBeUndefined();
+    expect(browser.calls.at(-1)?.args.danmaku).toBe(false);
+    expect((await call('video', { page: 'p1', action: 'tune', danmaku: false })).text).toContain('"appliesAtBatch":2');
+    expect(world.status().sampling).toMatchObject({ current: { danmaku: true }, pending: { danmaku: false, windowSec: 10 } });
+    await advance(10000);
+    expect((await call('video', { page: 'p1', action: 'tune', danmaku: true })).text).toContain('"appliesAtBatch":3');
+    await advance(20000);
+    expect(await Promise.all([0, 1, 2].map(batch))).toMatchObject([
+      { frameTimes: [0, 5, 10], observation: { danmaku: true } },
+      { frameTimes: [10, 15, 20], observation: { danmaku: false } },
+      { frameTimes: [20, 25, 30], observation: { danmaku: true } },
+    ]);
+    expect(browser.calls.filter(c => c.args.consumeFrames).map(c => c.args.danmaku)).toEqual([true, false, true]);
+    expect(cfg.video.danmaku).toBe(false);
+    await call('video', { page: 'p1', action: 'watch' });
+    expect(world.status().sampling?.current.danmaku).toBe(false);
   });
   it('freezes defaults and frame size until the batch boundary, then applies hot configuration', async () => {
     vi.useFakeTimers(); videoFixture(); await call('video', { page: 'p1', action: 'watch' });

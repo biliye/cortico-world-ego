@@ -28,10 +28,11 @@ export const EGO_TOOL_DECLS: readonly ToolSpec[] = [
   tool('shot', 'Capture the viewport as an image attachment.', { page }, ['page'], true),
   tool('close', 'Close a bot-created page. Stops watching that page.', { page }, ['page']),
   tool('handoff', 'Give the operator control and stop commands and watching.', {}, []),
-  tool('video', 'Inspect or control HTML5 video, including iframes. inspect reports playback, tracks and frameId. look captures immediately. watch starts playback and sampling; the first receipt has no image. Early end delivers collected frames. play alone does not start sampling; pause, seek and exit stop watching. video-frame is one image; video-mosaic tiles follow frameTimes in row order and share a boundary frame across batches. Viewport fallback may omit the video. Subtitles and Bilibili danmaku are separate text; no audio transcription.', {
+  tool('video', 'Inspect or control HTML5 video, including iframes. inspect reports playback, tracks and frameId. look captures immediately. watch starts playback and sampling; the first receipt has no image. Early end delivers collected frames. play alone does not start sampling; pause, seek and exit stop watching. video-frame is one image; video-mosaic tiles follow frameTimes in row order and share a boundary frame across batches. Viewport fallback may omit the video. Available subtitles and danmaku are separate text. Audio transcription is unavailable.', {
     page, action: { type: 'string', enum: ['inspect', 'play', 'pause', 'seek', 'look', 'watch', 'tune', 'exit'] },
     windowSec: { type: 'number', minimum: 10, maximum: 120, description: 'Video seconds per mosaic. Pair with frameIntervalSec on watch/tune. Omit both on watch for operator defaults. tune applies at the next batch and preserves queued scenes.' },
     frameIntervalSec: { type: 'number', minimum: 1, maximum: 120, description: 'Video seconds between frames, at most windowSec. Both endpoints count: ceil(windowSec / frameIntervalSec) + 1 <= 9.' },
+    danmaku: { type: 'boolean', description: 'Include danmaku text on watch or look. On an active watch, tune with just danmaku to switch it from the next batch. Overrides apply only to this watch or look; the player display is independent.' },
     frameId: text('From inspect; omit to scan page frames.'), selector: text('CSS video selector in the frame.'),
     index: { type: 'integer', minimum: 0, description: 'Zero-based video index in the frame.' },
     time: { type: 'number', minimum: 0, description: 'Required for seek, in video seconds.' },

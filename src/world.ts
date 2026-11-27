@@ -28,10 +28,11 @@ const STOP_CODES = /EGO_TASK_SPACE_(USER_IN_CONTROL|INACTIVE|NAME_IN_USE|NOT_FOU
 const PLAYBACK_KEEPALIVE_MS = 10 * 60_000;
 const PLAYBACK_RETRY_DELAYS_MS = [60_000, 120_000, 240_000];
 interface PlaybackTarget { page: string; frameId?: string; selector?: string; index?: number }
+interface WatchOptions { sampling?: SamplingOverride; danmaku?: boolean }
 interface Watch {
   page: string; frameId?: string; selector?: string; index?: number; since: number; source?: string; generation: number;
   nextSampleAt: number; batch: number; targetIndex: number; lastTime: number; playbackRate: number;
-  plan: SamplingPlan; override?: SamplingOverride; pendingOverride?: SamplingOverride;
+  plan: SamplingPlan; override: WatchOptions; pendingOverride?: WatchOptions;
   smoothWatch: boolean; deferredScenes: number; skipped?: { batches: number; from: number; to: number };
   completed?: boolean; backpressured?: boolean;
 }
@@ -558,12 +559,14 @@ export class EgoWorld implements World {
     }
     const action = String(args.action);
     // Resolve and validate before cancelling a previous watch or causing playback effects.
-    const override = samplingOverride(args);
+    const sampling = samplingOverride(args);
+    const danmaku = args.danmaku as boolean | undefined;
+    const override: WatchOptions = { ...(sampling && { sampling }), ...(danmaku !== undefined && { danmaku }) };
     if (action === 'tune') {
       const watch = this.watch;
       if (!watch || watch.page !== args.page) throw new Error('tune requires an active watch on the same page.');
       if (['frameId', 'selector', 'index'].some(key => args[key] !== undefined && args[key] !== watch[key as 'frameId' | 'selector' | 'index'])) throw new Error('tune cannot change the watched video; omit the video selector or start a new watch.');
-      watch.pendingOverride = override;
+      watch.pendingOverride = { ...watch.override, ...watch.pendingOverride, ...override };
       const observation = { phase: 'tuning', watching: true, ...this.samplingStatus(watch), appliesAtBatch: watch.batch + 1,
         note: 'Accepted for the next batch. The current batch and queued scenes are retained; the last frame becomes the next batch boundary.' };
       await this.event('video.state', JSON.stringify({ page: watch.page, action, observation }), true);
@@ -573,8 +576,10 @@ export class EgoWorld implements World {
       return { text: 'Playback is waiting for queued mosaics to be delivered. It will resume automatically after delivery.' };
     }
     if (['pause', 'seek', 'exit', 'watch'].includes(action)) this.cancelWatch();
-    const plan = action === 'watch' ? samplingPlan(this.options.cfg, override) : this.watch && this.watch.page === args.page ? this.watch.plan : samplingPlan(this.options.cfg);
-    const videoArgs = { ...args, ...captureOptions(plan), collecting: action === 'watch' || this.watch?.page === args.page,
+    const watchOnPage = this.watch && this.watch.page === args.page ? this.watch : undefined;
+    const plan = watchOnPage?.plan ?? samplingPlan(this.options.cfg, sampling, danmaku);
+    const videoArgs = { ...args, ...captureOptions(plan), danmaku: danmaku ?? plan.danmaku,
+      collecting: action === 'watch' || this.watch?.page === args.page,
       snapshotOnly: action === 'look' && this.watch?.page === args.page };
     const value = await this.command('video', { ...videoArgs, resetFrames: action === 'watch' || action === 'exit', action: action === 'watch' ? 'play' : action === 'exit' ? 'pause' : action }, signal);
     if (!value.found) return { text: `offset=0\n${JSON.stringify(value)}`, ...(action === 'inspect' ? {} : { failed: true as const }) };
@@ -587,8 +592,9 @@ export class EgoWorld implements World {
     }
     if (!['inspect', 'look'].includes(action)) await this.event('video.state', JSON.stringify({ page: args.page, action, time: value.time, paused: value.paused }), true);
     if (action !== 'watch') {
-      if (action === 'look') value.observation = { phase: 'snapshot', watching: this.watch?.page === args.page,
+      if (action === 'look') value.observation = { phase: 'snapshot', watching: this.watch?.page === args.page, danmaku: videoArgs.danmaku,
         note: 'look captures now; it does not wait to collect a time window. For several frames within 15 seconds, call watch once and wait for ego.video.scene. Repeated watch restarts sampling.' };
+      if (action === 'inspect' && watchOnPage && this.watch === watchOnPage) value.observation = { watching: true, ...this.samplingStatus(watchOnPage) };
       return this.outcome(value);
     }
     const startedAt = Date.now();
@@ -663,7 +669,8 @@ export class EgoWorld implements World {
     }
   }
   private samplingStatus(watch: Watch) {
-    const next = samplingPlan(this.options.cfg, watch.pendingOverride ?? watch.override);
+    const nextOverride = watch.pendingOverride ?? watch.override;
+    const next = samplingPlan(this.options.cfg, nextOverride.sampling, nextOverride.danmaku);
     return { batch: watch.batch, current: samplingSummary(watch.plan),
       pending: JSON.stringify(next) !== JSON.stringify(watch.plan) ? samplingSummary(next) : null };
   }
@@ -808,7 +815,7 @@ export class EgoWorld implements World {
           if (completed) {
             watch.since = value.time; watch.batch++; watch.targetIndex = 1;
             if (watch.pendingOverride) { watch.override = watch.pendingOverride; watch.pendingOverride = undefined; }
-            watch.plan = samplingPlan(this.options.cfg, watch.override);
+            watch.plan = samplingPlan(this.options.cfg, watch.override.sampling, watch.override.danmaku);
           } else {
             watch.targetIndex++;
             // Skip targets already passed; never pretend catch-up frames reconstruct the past.
@@ -890,6 +897,9 @@ function validate(operation: string, input: Record<string, unknown>): Record<str
   if (operation === 'video') {
     if (!['inspect', 'play', 'pause', 'seek', 'look', 'watch', 'tune', 'exit'].includes(String(args.action))) throw new Error('Invalid video action.');
     if (args.action === 'seek' && args.time === undefined) throw new Error('seek requires time in seconds.');
+    if (args.danmaku !== undefined && (typeof args.danmaku !== 'boolean' || !['watch', 'tune', 'look'].includes(String(args.action)))) {
+      throw new Error('danmaku must be a boolean on watch, tune or look.');
+    }
   }
   if (operation === 'bilibili' && (!['search', 'related', 'comments'].includes(String(args.action)) || (args.action === 'search' && (typeof args.query !== 'string' || !args.query.trim())))) throw new Error('Invalid Bilibili action or missing search query.');
   return args;

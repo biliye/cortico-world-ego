@@ -51,7 +51,7 @@ it('attaches only iframe targets descending from the managed page and detaches i
   expect(calls.filter(c => c.method === 'Target.attachToTarget').map(c => c.params.targetId)).toEqual(['owned-child']);
   expect(calls.some(c => c.method === 'Target.detachFromTarget')).toBe(true);
 });
-it('returns the smooth scene before Bilibili subtitles arrive and retrieves them in a later command', async () => {
+it.each([true, false])('returns smooth scenes and later Bilibili subtitles regardless of danmaku: %s', async danmaku => {
   const location = new URL('https://www.bilibili.com/video/BV1xx');
   let respond!: (value: Response) => void;
   const fetch = vi.fn(() => new Promise<Response>(resolve => { respond = resolve; }));
@@ -59,17 +59,48 @@ it('returns the smooth scene before Bilibili subtitles arrive and retrieves them
     window: { __INITIAL_STATE__: { videoData: { cid: 42, aid: 1 } } } });
   page.url = async () => location.href;
   page.evaluate = (fn: string | Function, args: unknown) => runInContext(typeof fn === 'string' ? fn : `(${fn.toString()})(${JSON.stringify(args)})`, context);
-  const scene = await execute({ operation: 'video', args: { page: 'p1', action: 'look', smoothWatch: true, since: 0 } });
+  const scene = await execute({ operation: 'video', args: { page: 'p1', action: 'look', smoothWatch: true, since: 0, danmaku } });
   expect(scene.error).toBeUndefined();
   expect(scene.value).toMatchObject({ image: { mime: 'image/jpeg' }, enrichmentId: expect.any(String) });
   expect(fetch).toHaveBeenCalledOnce();
   const id = scene.value.enrichmentId;
   const poll = () => execute({ operation: 'video', args: { page: 'p1', action: 'watch-enrichment', ids: [id] } });
-  expect((await poll()).value[id]).toMatchObject({ complete: false, value: { danmaku: { status: 'unavailable' } } });
+  expect((await poll()).value[id]).toMatchObject({ complete: false, value: danmaku ? { danmaku: { status: 'unavailable' } } : {} });
   respond(new Response(JSON.stringify({ code: 0, data: {} })));
-  await vi.waitFor(async () => expect((await poll()).value[id]).toMatchObject({ complete: true,
-    value: { bilibili: { subtitleStatus: 'no-subtitles-returned' } } }));
+  await vi.waitFor(async () => {
+    const enriched = (await poll()).value[id];
+    expect(enriched).toMatchObject({ complete: true, value: { bilibili: { subtitleStatus: 'no-subtitles-returned' } } });
+    if (!danmaku) expect(enriched.value).not.toHaveProperty('danmaku');
+  });
   expect((await poll()).value[id]).toBeNull();
+});
+it.each([true, false])('reads Douyin danmaku only when enabled, through serialized page code: %s', async danmaku => {
+  const location = new URL('https://www.douyin.com/video/12345');
+  const observed = 'https://www.douyin.com/aweme/v1/web/danmaku/get_v2/?item_id=12345&start_time=0&end_time=3000';
+  const fetch = vi.fn(async () => new Response(JSON.stringify({ status_code: 0,
+    danmaku_list: [{ danmaku_id: '1', offset_time: 1000, text: '一秒弹幕', digg_count: 20 }] })));
+  const context = createContext({ location, URL, AbortSignal, fetch, performance: { getEntriesByType: () => [{ name: observed }] }, window: {} });
+  page.url = async () => location.href;
+  page.evaluate = vi.fn((fn: string | Function, args: unknown) =>
+    runInContext(typeof fn === 'string' ? fn : `(${fn.toString()})(${JSON.stringify(args)})`, context));
+  const result = await execute({ operation: 'video', args: { page: 'p1', action: 'look', smoothWatch: true, since: 0, danmaku } });
+  expect(result.error).toBeUndefined();
+  expect(result.value).toMatchObject({ image: { mime: 'image/jpeg' } });
+  if (!danmaku) {
+    expect(result.value).not.toHaveProperty('enrichmentId');
+    expect(page.evaluate).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    return;
+  }
+  const id = result.value.enrichmentId;
+  expect(id).toEqual(expect.any(String));
+  await vi.waitFor(async () => {
+    const polled = await execute({ operation: 'video', args: { page: 'p1', action: 'watch-enrichment', ids: [id] } });
+    expect(polled.value[id]).toMatchObject({ complete: true,
+      value: { danmaku: { status: 'available', comments: [{ time: 1, likes: 20 }] } } });
+  });
+  expect(fetch).toHaveBeenCalledOnce();
+  expect(fetch).toHaveBeenCalledWith(observed, expect.any(Object));
 });
 it('refuses to close a user-owned tab even when it is managed', async () => {
   task.tabs = async () => [{ label: 'p1', openedBy: 'unknown' }];

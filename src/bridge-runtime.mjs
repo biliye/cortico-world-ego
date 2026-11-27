@@ -2,6 +2,8 @@
 import { videoOperation } from './video-page.mjs';
 import { bilibiliDanmaku, decodeDanmakuSegment } from './bilibili-danmaku.mjs';
 import { bilibiliComments } from './bilibili-comments.mjs';
+import { douyinDanmaku } from './douyin-danmaku.mjs';
+import { selectDanmaku } from './danmaku-selection.mjs';
 import { downloadFile, uploadFile } from './file-transfer.mjs';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -191,23 +193,31 @@ async function runVideo(task, page, args) {
     state.capture = 'viewport-fallback';
     state.captureNote = 'Video pixels could not be read (CORS/DRM/not ready). This image is the page viewport at capture time; it may not show the video.';
   }
-  if (capturedScene && /(^|\.)bilibili\.com$/.test(new URL(await page.url()).hostname)) {
+  const hostname = capturedScene ? new URL(await page.url()).hostname : '';
+  const bilibili = /(^|\.)bilibili\.com$/.test(hostname);
+  const douyin = /(^|\.)douyin\.com$/.test(hostname);
+  const danmakuReader = args.danmaku === false ? null : bilibili
+    ? `range => (${bilibiliDanmaku})(range, ${decodeDanmakuSegment}, ${selectDanmaku})`
+    : douyin ? `range => (${douyinDanmaku})(range, ${selectDanmaku})` : null;
+  if (bilibili || danmakuReader) {
     const range = { time: state.time, since: args.since <= state.time ? args.since : Math.max(0, state.time - 15) };
     if (args.smoothWatch) {
       const id = randomUUID();
-      const job = JSON.stringify({ id, range, danmaku: args.danmaku !== false });
+      const job = JSON.stringify({ id, range });
       try {
-        await page.evaluate(`(${startVideoEnrichment})(${job}, ${bilibiliSubtitles}, ${bilibiliDanmaku}, ${decodeDanmakuSegment})`);
+        await page.evaluate(`(${startVideoEnrichment})(${job}, ${bilibili ? bilibiliSubtitles : 'null'}, ${danmakuReader ?? 'null'})`);
         state.enrichmentId = id;
       } catch (error) {
         if (errorCode(error)?.startsWith('EGO_TASK_') || error.mayHaveLateEffects) throw error;
         state.enrichmentIncomplete = true;
       }
     } else {
-      try { state.bilibili = await page.evaluate(bilibiliSubtitles, range); }
-      catch (error) { if (errorCode(error)?.startsWith('EGO_TASK_') || error.mayHaveLateEffects) throw error; state.subtitleError = error.message; }
-      if (args.danmaku !== false) {
-        try { state.danmaku = await page.evaluate(`(${bilibiliDanmaku.toString()})(${JSON.stringify(range)},${decodeDanmakuSegment.toString()})`); }
+      if (bilibili) {
+        try { state.bilibili = await page.evaluate(bilibiliSubtitles, range); }
+        catch (error) { if (errorCode(error)?.startsWith('EGO_TASK_') || error.mayHaveLateEffects) throw error; state.subtitleError = error.message; }
+      }
+      if (danmakuReader) {
+        try { state.danmaku = await page.evaluate(`(${danmakuReader})(${JSON.stringify(range)})`); }
         catch (error) { if (errorCode(error)?.startsWith('EGO_TASK_') || error.mayHaveLateEffects) throw error; state.danmaku = { status: 'unavailable', error: error.message }; }
       }
     }
@@ -215,17 +225,17 @@ async function runVideo(task, page, args) {
   return state;
 }
 // Page-scoped jobs reuse the site's session. Only scheduling and reading results occupy the CLI queue.
-function startVideoEnrichment({ id, range, danmaku }, readSubtitles, readDanmaku, decode) {
+function startVideoEnrichment({ id, range }, readSubtitles, readDanmaku) {
   const jobs = globalThis.__corticoEgoVideoEnrichment ??= new Map();
   // The host retains at most four scenes. Reserve room for the new one before it can evict the oldest.
   if (jobs.size >= 4) jobs.delete(jobs.keys().next().value);
-  const job = { url: location.href, remaining: danmaku ? 2 : 1, value: {} };
+  const job = { url: location.href, remaining: Number(Boolean(readSubtitles)) + Number(Boolean(readDanmaku)), value: {} };
   jobs.set(id, job);
-  void readSubtitles(range).then(
+  if (readSubtitles) void readSubtitles(range).then(
     value => { job.value.bilibili = value; },
     error => { job.value.subtitleError = error.message; },
   ).finally(() => { job.remaining--; });
-  if (danmaku) void readDanmaku(range, decode).then(
+  if (readDanmaku) void readDanmaku(range).then(
     value => { job.value.danmaku = value; },
     error => { job.value.danmaku = { status: 'unavailable', error: error.message }; },
   ).finally(() => { job.remaining--; });

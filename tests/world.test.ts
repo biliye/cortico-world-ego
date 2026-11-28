@@ -349,6 +349,7 @@ describe('control boundaries', () => {
     vi.useFakeTimers(); browser.next = evaluationTimeout();
     const result = await call('evaluate', { page: 'p1', expression: 'new Promise(r => setTimeout(r, 20000))' });
     expect(result.failed).toBe(true); expect(result.text).toContain('EGO_PAGE_EVALUATION_TIMED_OUT');
+    expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', text: expect.stringContaining('evaluation still pending') });
     const beforeTabs = browser.calls.length, tabs = await call('tabs');
     expect(tabs.failed).toBeUndefined(); expect(tabs.text).toContain('Read-only diagnosis only'); expect(browser.calls).toHaveLength(beforeTabs + 1);
     const read = await call('read', { page: 'p1', fullPage: true, offset: 2, maxChars: 100 });
@@ -364,6 +365,7 @@ describe('control boundaries', () => {
     expect(browser.calls.slice(count).every(c => c.op === 'control-status')).toBe(true); expect(world.status().halted).toBe(true);
     await world.stop(); await world.start(host());
     expect(world.status()).toMatchObject({ halted: true, evaluation: { timeoutMs: 15000, pageResponsive: true } });
+    expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', text: expect.stringContaining('evaluation still pending') });
     expect((await call('tabs')).failed).toBeUndefined();
     expect((await call('read', { page: 'p1' })).failed).toBeUndefined();
     await world.webUi().invoke!('control', 'resume', []); expect(world.status()).toMatchObject({ halted: false, evaluation: undefined });
@@ -958,6 +960,16 @@ describe('video observation lifetime', () => {
     expect(start.text).toContain('"phase":"collecting"'); expect(start.text).toContain('"nextEvent":"ego.video.scene"');
     expect(start.text).toContain('Read frameTimes in row order');
     expect(start.blobs).toBeUndefined(); expect(start.text).not.toContain('"frameCount"'); expect(deferred).toHaveLength(0);
+  });
+  it('delivers browser error details from background sampling as an external event', async () => {
+    vi.useFakeTimers();
+    await call('video', { page: 'p1', action: 'watch' });
+    const error = 'Video player error reported by the page';
+    browser.next = { spaceId: 1, error };
+    await advance(5000);
+    expect(world.status().watching).toBeNull();
+    expect(events.at(-1)).toMatchObject({ type: 'ego.video.state', origin: 'external', text: expect.stringContaining(error) });
+    expect(deferred).toHaveLength(0);
   });
   it('flushes a short final scene before 15 seconds, stops watching and leaves the scene deliverable', async () => {
     vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });

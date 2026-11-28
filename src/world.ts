@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import type { ToolDef, ToolOutcome, World, WorldHost, WorldWebUiDecl } from 'cortico/core/types.ts';
+import type { EventOrigin, ToolDef, ToolOutcome, World, WorldHost, WorldWebUiDecl } from 'cortico/core/types.ts';
 import { mimeOfHandle } from 'cortico/core/blobs.ts';
 import { nowIso } from 'cortico/core/util.ts';
 import { CliBridge, type EgoBridge, type BridgeReceipt, type EvaluationTimeout } from './bridge.ts';
@@ -192,7 +192,7 @@ export class EgoWorld implements World {
               this.cancelWatch(); this.connected = false;
               if (!this.saved.halted) { this.saved.code = 'EGO_HELPER_UNAVAILABLE'; this.saved.reason = 'The operator stopped the ordinary-permission helper.'; await this.save(); }
             }
-            await this.event('state', 'The operator stopped the ordinary-permission helper.', true);
+            await this.event('state', 'The operator stopped the ordinary-permission helper.', 'internal');
           } else if (method === 'open-helper-folder') {
             if (!this.launcherFile || process.platform !== 'win32') throw new Error(zh ? '请先生成启动脚本' : 'Generate the launcher first');
             await new Promise<void>((done, fail) => {
@@ -205,7 +205,7 @@ export class EgoWorld implements World {
             await this.command(this.saved.spaceId ? 'resume' : 'connect', {}, undefined, true);
             this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.saved.spaceMissing = false; this.saved.uncertain = false; this.saved.observationTimeout = false; this.saved.evaluation = undefined; this.saved.evaluationRecoveryBlocked = undefined; this.connected = true;
             this.clearControlCheck();
-            await this.save(); await this.event('state', 'The operator resumed this Ego Space.', true);
+            await this.save(); await this.event('state', 'The operator resumed this Ego Space.', 'internal');
           } else if (method === 'connect') {
             if (this.saved.halted) throw new Error(this.saved.reason);
             await this.connect();
@@ -274,10 +274,10 @@ export class EgoWorld implements World {
           lastUnknownEvaluation: saved.lastUnknownEvaluation && typeof saved.lastUnknownEvaluation === 'object' ? saved.lastUnknownEvaluation : undefined };
       }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.saved = { halted: true, reason: `Cannot read Ego state: ${String(error)}` }; } }
-    if (this.saved.halted && !this.canRecoverMissingSpace()) { this.scheduleControlCheck(); await this.event('state', `Ego paused: ${this.saved.reason}`, true); return; }
+    if (this.saved.halted && !this.canRecoverMissingSpace()) { this.scheduleControlCheck(); await this.event('state', `Ego paused: ${this.saved.reason}`, 'external'); return; }
     await this.serial(async () => {
       try { const missing = this.canRecoverMissingSpace(); await this.connect(missing, missing); }
-      catch (error) { this.connected = false; await this.event('state', `Ego connection failed: ${String(error)}`, true); }
+      catch (error) { this.connected = false; await this.event('state', `Ego connection failed: ${String(error)}`, 'external'); }
     });
   }
   async stop(): Promise<void> {
@@ -389,14 +389,14 @@ export class EgoWorld implements World {
           if (!receipt.error && !receipt.uncertain && receipt.spaceId === id && receipt.value?.control === 'agent') {
             this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.saved.uncertain = false; this.saved.observationTimeout = false;
             this.connected = true; this.clearControlCheck();
-            await this.save(); await this.event('state', 'Ego confirmed agent control of the same Space. Browser operations are available again. The failed operation was not replayed; video watching has not resumed. Refresh the page snapshot before using refs.', true);
+            await this.save(); await this.event('state', 'Ego confirmed agent control of the same Space. Browser operations are available again. The failed operation was not replayed; video watching has not resumed. Refresh the page snapshot before using refs.', 'internal');
             return;
           }
           if (receipt.value?.control === 'inactive' || /EGO_TASK_SPACE_(INACTIVE|NOT_FOUND|NOT_SELECTED|NAME_IN_USE|UNAVAILABLE)|EGO_TASK_HOST_DISCONNECTED/.test(receipt.code ?? '')) {
             // A control check must never trigger the separate missing-Space recreation path.
             this.saved.code = receipt.code ?? 'EGO_TASK_SPACE_INACTIVE'; this.saved.reason = receipt.error ?? 'This Space is no longer assigned to the agent.';
             this.saved.observationTimeout = false; this.saved.spaceMissing = false; this.clearControlCheck(); await this.save();
-            await this.event('state', `Ego remains paused: ${this.saved.code}: ${this.saved.reason}`, true); return;
+            await this.event('state', `Ego remains paused: ${this.saved.code}: ${this.saved.reason}`, 'external'); return;
           }
         } catch { /* Preserve the original stop. A failed observation cannot authorize resuming. */ }
         finally {
@@ -417,7 +417,7 @@ export class EgoWorld implements World {
         // Keep the original timeout; never route an uncertain script into Space recreation.
         this.saved.evaluationRecoveryBlocked = receipt.code ?? 'EGO_TASK_SPACE_INACTIVE';
         this.clearControlCheck(); await this.save();
-        await this.event('state', `Ego evaluation recovery remains paused: ${this.saved.evaluationRecoveryBlocked}. The original script outcome is still unknown.`, true);
+        await this.event('state', `Ego evaluation recovery remains paused: ${this.saved.evaluationRecoveryBlocked}. The original script outcome is still unknown.`, 'external');
         return false;
       }
       return valid(receipt) && receipt.value?.control === 'agent';
@@ -438,7 +438,7 @@ export class EgoWorld implements World {
       this.saved = previous; await this.save(); return;
     }
     this.connected = true; this.clearControlCheck();
-    await this.event('state', `Ego automatically restored browser operations after confirming agent control of the same Space and reading page ${this.saved.lastUnknownEvaluation.page}. ${UNKNOWN_EVALUATION_HINT} Refresh the snapshot before using refs.`, true);
+    await this.event('state', `Ego automatically restored browser operations after confirming agent control of the same Space and reading page ${this.saved.lastUnknownEvaluation.page}. ${UNKNOWN_EVALUATION_HINT} Refresh the snapshot before using refs.`, 'internal');
   }
   private canRecoverMissingSpace(): boolean {
     return this.saved.halted && this.saved.spaceMissing === true && this.saved.code === 'EGO_TASK_SPACE_NOT_FOUND'
@@ -470,7 +470,7 @@ export class EgoWorld implements World {
       this.connected = true; this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.saved.spaceMissing = false; this.saved.uncertain = false; this.saved.observationTimeout = false; this.saved.evaluation = undefined; this.saved.evaluationRecoveryBlocked = undefined;
       this.clearControlCheck();
       this.clearSpaceRecovery();
-      await this.save(); await this.event('state', `Ego connected. Space ${this.saved.spaceId} (${this.spaceName}).${byName ? ` ${automatic ? 'Automatically' : 'The operator'} re-established the missing Space by its dedicated name. ${SPACE_RESET_HINT}` : ''}${this.saved.lastUnknownEvaluation ? ` ${UNKNOWN_EVALUATION_HINT}` : ''}`, true);
+      await this.save(); await this.event('state', `Ego connected. Space ${this.saved.spaceId} (${this.spaceName}).${byName ? ` ${automatic ? 'Automatically' : 'The operator'} re-established the missing Space by its dedicated name. ${SPACE_RESET_HINT}` : ''}${this.saved.lastUnknownEvaluation ? ` ${UNKNOWN_EVALUATION_HINT}` : ''}`, 'internal');
     } catch (error) {
       if (!byName && this.canRecoverMissingSpace() && this.running && !this.lifetime.signal.aborted && !signal?.aborted) {
         await this.connect(true, true, signal); return;
@@ -499,7 +499,7 @@ export class EgoWorld implements World {
           throw new Error(`${receipt.code}: ${receipt.error}`);
         }
         this.saved.halted = false; this.saved.reason = receipt.error; this.saved.code = receipt.code; this.cancelWatch(); this.connected = false;
-        await this.save(); await this.event('state', `Ego connection unavailable: ${receipt.code}: ${receipt.error}`, true);
+        await this.save(); await this.event('state', `Ego connection unavailable: ${receipt.code}: ${receipt.error}`, 'external');
       } else if (receipt.uncertain || receipt.code === 'EGO_PAGE_EVALUATION_TIMED_OUT' || STOP_CODES.test(receipt.code ?? receipt.error)) {
         this.clearPlaybackKeepalive();
         this.saved.halted = true; this.saved.reason = `${receipt.code ?? 'UNCERTAIN'}: ${receipt.error}`; this.saved.code = receipt.code ?? 'UNCERTAIN';
@@ -510,7 +510,7 @@ export class EgoWorld implements World {
         this.clearControlCheck(); this.scheduleControlCheck();
         this.saved.spaceMissing = receipt.code === 'EGO_TASK_SPACE_NOT_FOUND' && !receipt.uncertain; this.cancelWatch(); this.connected = false;
         if (!this.saved.spaceMissing) this.clearSpaceRecovery();
-        await this.save(); await this.event('state', `Ego stopped: ${this.saved.reason}`, true);
+        await this.save(); await this.event('state', `Ego stopped: ${this.saved.reason}`, 'external');
         if (this.canRecoverMissingSpace() && this.running && !combined.aborted) {
           this.scheduleSpaceRecovery();
           if (!byName && !operatorResume && operation !== 'connect') {
@@ -532,7 +532,7 @@ export class EgoWorld implements World {
     this.clearPlaybackKeepalive();
     this.saved.halted = true; this.saved.reason = 'Control was handed to the operator.'; this.saved.code = 'EGO_TASK_SPACE_USER_IN_CONTROL'; this.connected = false;
     this.saved.uncertain = false; this.saved.observationTimeout = false; this.clearControlCheck(); this.scheduleControlCheck();
-    await this.save(); await this.event('state', this.saved.reason, true);
+    await this.save(); await this.event('state', this.saved.reason, 'internal');
     return { text: this.saved.reason };
   }
   private cancelWatch(): void {
@@ -569,7 +569,7 @@ export class EgoWorld implements World {
       watch.pendingOverride = { ...watch.override, ...watch.pendingOverride, ...override };
       const observation = { phase: 'tuning', watching: true, ...this.samplingStatus(watch), appliesAtBatch: watch.batch + 1,
         note: 'Accepted for the next batch. The current batch and queued scenes are retained; the last frame becomes the next batch boundary.' };
-      await this.event('video.state', JSON.stringify({ page: watch.page, action, observation }), true);
+      await this.event('video.state', JSON.stringify({ page: watch.page, action, observation }), 'internal');
       return this.outcome({ observation });
     }
     if (action === 'play' && this.watch?.backpressured && this.watch.page === args.page) {
@@ -590,7 +590,7 @@ export class EgoWorld implements World {
       else this.playing.delete(key);
       this.schedulePlaybackKeepalive();
     }
-    if (!['inspect', 'look'].includes(action)) await this.event('video.state', JSON.stringify({ page: args.page, action, time: value.time, paused: value.paused }), true);
+    if (!['inspect', 'look'].includes(action)) await this.event('video.state', JSON.stringify({ page: args.page, action, time: value.time, paused: value.paused }), 'internal');
     if (action !== 'watch') {
       if (action === 'look') value.observation = { phase: 'snapshot', watching: this.watch?.page === args.page, danmaku: videoArgs.danmaku,
         note: 'look captures now; it does not wait to collect a time window. For several frames within 15 seconds, call watch once and wait for ego.video.scene. Repeated watch restarts sampling.' };
@@ -752,7 +752,7 @@ export class EgoWorld implements World {
           if (!this.canDeliverVideo(watch)) return;
           if (receipt && (STOP_CODES.test(receipt.code ?? receipt.error ?? '') || (receipt.spaceId && receipt.spaceId !== spaceId))) {
             this.cancelWatch();
-            await this.event('video.state', 'Video observation stopped: the original Space is unavailable or no longer under agent control.', true);
+            await this.event('video.state', 'Video observation stopped: the original Space is unavailable or no longer under agent control.', 'internal');
             return;
           }
           appMissing = receipt?.code === 'EGO_APP_NOT_FOUND';
@@ -778,8 +778,8 @@ export class EgoWorld implements World {
       const value = await this.command('video', { ...watch, action: 'play' });
       if (!value.found || value.ended || value.paused || value.source !== watch.source) { this.cancelWatch(); return; }
       watch.backpressured = false; this.updateTiming(watch, value, Date.now()); this.schedule(watch);
-      await this.event('video.state', 'Scene delivery caught up; playback and observation resumed.', true);
-    } catch (error) { this.cancelWatch(); await this.event('video.state', `Video observation stopped: ${String(error)}`, true); }
+      await this.event('video.state', 'Scene delivery caught up; playback and observation resumed.', 'internal');
+    } catch (error) { this.cancelWatch(); await this.event('video.state', `Video observation stopped: ${String(error)}`, 'external'); }
   }
   private schedule(watch: Watch): void {
     if (!this.running || this.saved.halted || this.watch !== watch) return;
@@ -794,7 +794,7 @@ export class EgoWorld implements World {
             action: observe ? 'look' : 'sample', consumeFrames: observe, holdPlayback: observe && !watch.smoothWatch });
           if (!this.running || this.watch !== watch || this.generation !== watch.generation) return;
           if (!value.found || (!value.ended && value.paused) || value.source !== watch.source || value.time < watch.lastTime - 0.02) {
-            this.cancelWatch(); await this.event('video.state', `Watching stopped: ${JSON.stringify({ page: watch.page, found: value.found, paused: value.paused, ended: value.ended, sourceChanged: value.source !== watch.source })}`, true); return;
+            this.cancelWatch(); await this.event('video.state', `Watching stopped: ${JSON.stringify({ page: watch.page, found: value.found, paused: value.paused, ended: value.ended, sourceChanged: value.source !== watch.source })}`, 'internal'); return;
           }
           if (value.samplePending) { this.updateTiming(watch, value, startedAt); this.schedule(watch); return; }
           if (value.ended) {
@@ -804,7 +804,7 @@ export class EgoWorld implements World {
             // Natural completion keeps its last scene deliverable. Explicit cancellation still invalidates it.
             watch.completed = true; this.watch = undefined; this.timer = undefined;
             if (value.time !== watch.since) this.publishScene(watch, value, true);
-            await this.event('video.state', `Playback ended; final observation generated for page=${watch.page}.`, true);
+            await this.event('video.state', `Playback ended; final observation generated for page=${watch.page}.`, 'internal');
             return;
           }
           const completed = observe || value.batchComplete;
@@ -824,7 +824,7 @@ export class EgoWorld implements World {
           if (completed && !watch.smoothWatch && this.pendingScenes.size >= MAX_PENDING_SCENES) {
             watch.backpressured = true;
             if (!value.playbackHeld) await this.command('video', { ...watch, action: 'pause', preserveFrames: true });
-            await this.event('video.state', 'Playback paused while completed mosaics wait for delivery. Observation resumes automatically after delivery; queued scenes are retained.', true);
+            await this.event('video.state', 'Playback paused while completed mosaics wait for delivery. Observation resumes automatically after delivery; queued scenes are retained.', 'internal');
             return;
           }
           if (value.playbackHeld) {
@@ -835,7 +835,7 @@ export class EgoWorld implements World {
           }
           this.schedule(watch);
         } catch (error) {
-          this.cancelWatch(); await this.event('video.state', `Video observation stopped: ${String(error)}`, true);
+          this.cancelWatch(); await this.event('video.state', `Video observation stopped: ${String(error)}`, 'external');
         }
       });
     }, Math.max(0, watch.nextSampleAt - Date.now()));
@@ -864,8 +864,8 @@ export class EgoWorld implements World {
     if (image?.mime && this.host?.modelFacts?.accepts(image.mime) === false) result.text += '\nThe configured model does not accept this image MIME. It can read the returned subtitles; choose a vision-capable model to interpret the frames.';
     return result;
   }
-  private async event(type: string, text: string, internal = false): Promise<void> {
-    await this.host?.pushEvent({ type: `ego.${type}`, source: this.id, senderKey: this.id, ts: nowIso(this.options.timezone), text, ...(internal ? { origin: 'internal' as const } : {}) }, { trigger: 'flush' });
+  private async event(type: string, text: string, origin: EventOrigin): Promise<void> {
+    await this.host?.pushEvent({ type: `ego.${type}`, source: this.id, senderKey: this.id, ts: nowIso(this.options.timezone), text, origin }, { trigger: 'flush' });
   }
 }
 export function normalizeUrl(input: string): string {

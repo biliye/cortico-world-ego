@@ -76,6 +76,8 @@ Ego 会在执行浏览器脚本之前拒绝管理员身份的 `ego-browser`，�
 | `ego_bilibili` | B 站搜索、推荐与评论，只读 |
 | `ego_handoff` | 交给操作员，停止操作与采集 |
 
+`ego_evaluate` 在指定页面中执行 JavaScript，沿用该页面可访问的登录态。陪看由 `watch` 启动，画面附件会进入已配置的模型上下文。异步投递的陪看场景和含浏览器错误详情的通知会标为外部事件。
+
 每次传输一个文件，最大 8 MiB。
 
 - 上传用 `ego_upload {page, selector, handle:"mem:blobs/photo.png"}`。如果 `selector` 指向打开文件选择器的按钮，加 `chooser:true`。选中文件后检查页面，按需要另点提交。浏览器后续提交仍需读取暂存文件，暂存超过 24 小时后会在下一次上传时清理。

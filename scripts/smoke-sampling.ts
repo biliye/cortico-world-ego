@@ -5,6 +5,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { EgoWorld } from '../src/world.ts';
 import { CliBridge } from '../src/bridge.ts';
+import { smokeTools } from './smoke-tools.ts';
 import { EGO_DEFAULTS } from '../src/config.ts';
 import { nullLogger } from 'cortico/core/util.ts';
 import type { DeferredEventSpec, ToolOutcome, WorldHost } from 'cortico/core/types.ts';
@@ -36,22 +37,22 @@ const world = new EgoWorld({ cfg, dataDir: dir, botDir: dir, timezone: 'Asia/Sha
     return receipt;
   },
 } });
+const fixtureBridge = new CliBridge({ cliFile: cfg.cliFile, dataDir: dir, timeoutMs: () => 15000,
+  runtimeUrl: new URL('./smoke-runtime.mjs', import.meta.url).href });
 const scenes: DeferredEventSpec[] = [];
 const host = { log: nullLogger(), pushEvent: async (event: any) => { evidence.events.push({ type: event.type, text: event.text }); return event; },
   pushDeferred: (event: DeferredEventSpec) => { scenes.push(event); console.log(`Mosaic ${scenes.length} queued.`); } } as unknown as WorldHost;
-async function call(name: string, args: Record<string, unknown> = {}): Promise<ToolOutcome> {
-  const raw = await world.tools().find(t => t.name === `ego_${name}`)!.handler(args, { role: 'smoke', log: nullLogger() });
-  const result = typeof raw === 'string' ? { text: raw } : raw; assert(!result.failed, result.text); return result;
-}
+const smoke = smokeTools(world, host);
+const { call } = smoke;
 const data = (result: ToolOutcome) => JSON.parse(result.text.slice(result.text.indexOf('\n') + 1));
 try {
-  await world.start(host); assert(world.status().connected, JSON.stringify(world.status()));
+  await world.start(smoke.host); assert(world.status().connected, JSON.stringify(world.status()));
   console.log(JSON.stringify({ spaceId: world.status().spaceId, spaceName: cfg.spaceName }));
   const page = data(await call('open', { url: `http://127.0.0.1:${(server.address() as any).port}/` })).page;
   console.log('Recording a finite 34-second local test video.');
   let ready = false; const readyDeadline = Date.now() + 45000;
   while (!ready && Date.now() < readyDeadline) {
-    const result = await bridge.run('evaluate', { spaceId: world.status().spaceId, page, expression: 'Boolean(window.fixtureReady && document.querySelector("video").readyState >= 2)' });
+    const result = await fixtureBridge.run('fixture-video-ready', { spaceId: world.status().spaceId, page });
     assert(!result.error, result.error); ready = result.value === true;
     if (!ready) await new Promise(r => setTimeout(r, 1000));
   }

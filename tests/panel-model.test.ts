@@ -7,6 +7,11 @@ it('shows helper setup, without takeover recovery, for administrator rejection b
   expect(view.title).toBe('需要启动普通权限助手'); expect(view.canResume).toBe(false); expect(view.canHandoff).toBe(false); expect(view.canPause).toBe(false); expect(view.canConnect).toBe(false);
   expect(panelView({ ...base, code: 'EGO_HELPER_REQUIRED', helperOnline: true }).canConnect).toBe(true);
 });
+it('lets the operator stop a running old helper without treating it as ready', () => {
+  const view = panelView({ ...base, code: 'EGO_HELPER_VERSION', transport: 'helper', helperOutdated: true });
+  expect(view).toMatchObject({ title: '旧版助手仍在运行', canConnect: false, canStopHelper: true });
+  expect(view.detail).toContain('停止助手');
+});
 it('offers control return only for a real pause and connection retry only for connection failure', () => {
   const view = panelView({ ...base, halted: true, code: 'EGO_TASK_SPACE_USER_IN_CONTROL' });
   expect(view.canResume).toBe(true); expect(view.canConnect).toBe(false);

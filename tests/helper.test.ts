@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { startHelper } from '../src/helper.ts';
@@ -36,6 +36,22 @@ it('authenticates local requests and rejects cross-origin requests and unknown o
   expect((await fetch(`${url}/run`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ operation: 'node', args: {} }) })).status).toBe(400);
   expect(await new HelperBridge(dir, () => 1000).probe()).toBe(true);
   expect((await new HelperBridge(dir, () => 1000).run('tabs', {})).value).toBe(null); expect(called).toBe(1);
+});
+it('only forwards a page script from an authenticated host with explicit opt-in', async () => {
+  const run = vi.fn(async () => ({ value: 'Fixture title' }));
+  const service = await startHelper({ dir, checkElevated: async () => false, bridge: { run } });
+  close = service.close;
+  const url = `http://127.0.0.1:${service.port}/run`;
+  const bridge = new HelperBridge(dir, () => 1000);
+  const args = { page: 'p1', expression: 'document.title' };
+  const enabled = { ...args, allowPageScripts: true };
+  const unauthenticated = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ operation: 'evaluate', args: enabled }) });
+  expect(unauthenticated.status).toBe(401);
+  expect(await bridge.run('evaluate', args)).toMatchObject({ code: 'EGO_PAGE_SCRIPTS_DISABLED', uncertain: false });
+  expect(run).not.toHaveBeenCalled();
+  expect(await bridge.run('evaluate', enabled)).toEqual({ value: 'Fixture title' });
+  expect(run.mock.calls).toEqual([['evaluate', enabled, undefined]]);
 });
 it.each([
   { operation: 'video', args: { action: 'watch-enrichment' } },

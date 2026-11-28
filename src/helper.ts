@@ -19,7 +19,9 @@ export async function startHelper(options: { dir: string; cliFile?: string; time
   if (await (options.checkElevated ?? isElevated)()) throw new Error('EGO_CLIENT_ELEVATED: 普通权限助手不能以管理员身份运行。请在文件资源管理器中双击启动脚本，不要从管理员命令行启动。');
   const dir = resolve(options.dir);
   await mkdir(dir, { recursive: true });
-  if (await new HelperBridge(dir, () => 45000).probe()) throw new Error('EGO_HELPER_ALREADY_RUNNING: This directory already has a running helper.');
+  const status = await new HelperBridge(dir, () => 45000).status();
+  if (status === 'incompatible') throw new Error('EGO_HELPER_VERSION: Stop the old helper before starting the updated helper.');
+  if (status === 'ready') throw new Error('EGO_HELPER_ALREADY_RUNNING: This directory already has a running helper.');
   const token = randomBytes(32).toString('hex');
   const bridge = options.bridge ?? new CliBridge({ cliFile: options.cliFile || 'ego-browser', dataDir: dir, timeoutMs: () => options.timeoutMs ?? 45000,
     runtimeUrl: new URL('../src/bridge-runtime.mjs', import.meta.url).href });
@@ -43,6 +45,9 @@ export async function startHelper(options: { dir: string; cliFile?: string; time
       if (!req.headers['content-type']?.startsWith('application/json')) return reply(415, { error: 'JSON required' });
       const request = JSON.parse(await body(req));
       if (!OPERATIONS.has(request.operation) || !request.args || typeof request.args !== 'object' || Array.isArray(request.args)) return reply(400, { error: 'Unsupported operation or arguments' });
+      if (request.operation === 'evaluate' && request.args.allowPageScripts !== true) {
+        return reply(200, { error: 'Page JavaScript is disabled in the Ego settings.', code: 'EGO_PAGE_SCRIPTS_DISABLED', uncertain: false });
+      }
       const backgroundRead = (request.operation === 'video' && request.args.action === 'watch-enrichment')
         || (request.operation === 'tabs' && Array.isArray(request.args.playback));
       // A dropped background read can be cancelled without interrupting an operator command.

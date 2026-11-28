@@ -3,13 +3,13 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import type { ToolDef, ToolOutcome, World, WorldHost, WorldWebUiDecl } from 'cortico/core/types.ts';
+import type { EventOrigin, ToolCallContext, ToolDef, ToolOutcome, World, WorldHost, WorldWebUiDecl } from 'cortico/core/types.ts';
 import { mimeOfHandle } from 'cortico/core/blobs.ts';
 import { nowIso } from 'cortico/core/util.ts';
 import { CliBridge, type EgoBridge, type BridgeReceipt, type EvaluationTimeout } from './bridge.ts';
 import { bounded, egoConfigGroup, type EgoConfigSection } from './config.ts';
 import { EGO_TOOL_DECLS } from './tools.ts';
-import { AutoBridge, HelperBridge } from './helper-bridge.ts';
+import { AutoBridge, HelperBridge, type HelperStatus } from './helper-bridge.ts';
 import { prepareHelperLauncher } from './helper-launcher.ts';
 import { isConnectionFailure, normalizeFailure, normalizeSavedFailure } from './failures.ts';
 import { MAX_FILE_BYTES, safeFilename } from './file-transfer.mjs';
@@ -18,6 +18,8 @@ import { EgoSearch } from './search.ts';
 import type { SearchRequest } from './search-http.ts';
 import { SEARCH_SECRETS, isWebSearchProvider, validateSearchSettings, type SearchSettings } from './search-settings.ts';
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
+const RESULT_SESSION_REQUIRED = 'This session cannot receive Ego result events. Use this tool in the main session.';
+const PAGE_SCRIPTS_DISABLED = 'Page JavaScript is disabled in the Ego settings.';
 const UPLOAD_RETENTION_MS = 24 * 60 * 60 * 1000;
 const DOWNLOAD_EXTENSIONS: Readonly<Record<string, string>> = {
   'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif', 'image/webp': '.webp',
@@ -50,6 +52,14 @@ type VideoEnrichmentResults = Record<string, { complete: boolean; value: Record<
 const SPACE_RESET_HINT = 'Old page labels and refs are invalid; use ego_tabs and reopen needed pages. Video watching has not resumed. The failed operation was not replayed.';
 interface SavedState { spaceId?: number; halted: boolean; reason: string; code?: string; spaceMissing?: boolean; uncertain?: boolean; observationTimeout?: boolean; evaluation?: EvaluationTimeout; evaluationRecoveryBlocked?: string; lastUnknownEvaluation?: EvaluationTimeout }
 const UNKNOWN_EVALUATION_HINT = 'The timed-out script outcome remains unknown and it may still have late effects. Do not replay it automatically; inspect the current page and reconcile any submission before continuing. Video watching has not resumed.';
+class BrowserCommandError extends Error {
+  constructor(diagnostic: string, readonly toolText: string, readonly reported = false) { super(diagnostic); }
+}
+function publicFailureCode(code?: string, fallback = 'EGO_OPERATION_FAILED'): string {
+  if (typeof code === 'string' && (isConnectionFailure(code) || STOP_CODES.exec(code)?.[0] === code
+    || ['EGO_OPERATION_FAILED', 'EGO_COMMAND_TIMEOUT', 'EGO_DOWNLOAD_START_TIMEOUT', 'EGO_PAGE_EVALUATION_TIMED_OUT', 'UNCERTAIN'].includes(code))) return code;
+  return fallback;
+}
 export interface EgoWorldOptions {
   cfg: EgoConfigSection; timezone: string; dataDir: string; botDir: string; bridge?: EgoBridge;
   secret?: (name: string) => string | undefined;
@@ -66,9 +76,10 @@ export class EgoWorld implements World {
   private readonly helper: HelperBridge;
   private readonly helperDir: string;
   private readonly transport?: AutoBridge;
-  private helperOnline = false;
+  private helperStatus: HelperStatus = 'offline';
   private launcherFile = '';
   private saved: SavedState = { halted: false, reason: '' };
+  private lastCommandError?: string;
   private host?: WorldHost;
   private running = false;
   private connected = false;
@@ -105,33 +116,72 @@ export class EgoWorld implements World {
   }
   envPromptVars(): Record<string, string> { return { 'ego.spaceName': this.spaceName }; }
   tools(): ToolDef[] {
-    return EGO_TOOL_DECLS.map(spec => {
-      if (spec.name === 'ego_search') return { ...spec, interruptible: true, handler: (args, ctx) => this.searchPublic(args, ctx.signal) };
+    const specs = this.options.cfg.allowPageScripts === true
+      ? EGO_TOOL_DECLS : EGO_TOOL_DECLS.filter(spec => spec.name !== 'ego_evaluate');
+    return specs.map(spec => {
+      if (spec.name === 'ego_search') return { ...spec, interruptible: true, handler: (args, ctx) => this.searchPublic(args, ctx) };
       if (spec.name === 'ego_wait') return { ...spec, handler: (args, ctx) => this.wait(args, ctx.signal) };
       return { ...spec, handler: (args, ctx) => this.serial(async () => {
         if (!this.running) return { text: 'Ego World is stopped.', failed: true };
+        const hasExternalResult = spec.name !== 'ego_handoff' && !(spec.name === 'ego_video' && args.action === 'tune');
+        if (hasExternalResult && !this.canDeliverResult(ctx)) return { text: RESULT_SESSION_REQUIRED, failed: true };
         const diagnostic = this.isEvaluationDiagnostic(spec.name.slice(4));
-        if (this.saved.halted && !diagnostic) return { text: `Ego paused: ${this.saved.reason}\n${this.canRecoverMissingSpace() && (this.recoveryTimer || this.recoveringSpace) ? 'Automatic Space recovery is pending. Keep Ego and its helper available; do not repeat browser operations.' : this.canCheckEvaluation() && (this.controlTimer || this.checkingControl) ? 'Automatic recovery is checking agent control and the timed-out page snapshot. No panel resume is needed when diagnosis succeeds. Do not replay the timed-out script.' : this.canCheckControl() && (this.controlTimer || this.checkingControl) ? 'Control is checked automatically. Return control in Ego when finished; the World panel is an alternative. Do not repeat browser operations.' : 'The operator must resume in the World panel.'}${this.canDiagnoseEvaluation() ? '\nego_tabs and ego_read are available for read-only diagnosis without resuming. Use ego_wait for simple delays; elapsed time alone does not clear this pause.' : ''}`, failed: true };
-        if (!this.connected && !diagnostic) return { text: `Ego is not connected: ${this.saved.reason || 'Reconnect from the World panel.'}`, failed: true };
+        if (this.saved.halted && !diagnostic) return { text: this.pausedToolMessage(), failed: true };
+        if (!this.connected && !diagnostic) return { text: this.disconnectedToolMessage(), failed: true };
         ctx.signal?.throwIfAborted();
-        try { return await this.invokeTool(spec.name.slice(4), args, ctx.signal); }
-        catch (error) { return { text: error instanceof Error ? error.message : String(error), failed: true }; }
+        try {
+          const outcome = await this.invokeTool(spec.name.slice(4), args, ctx.signal);
+          return hasExternalResult ? await this.externalOutcome(spec.name, outcome, ctx) : outcome;
+        }
+        catch (error) {
+          if (error instanceof BrowserCommandError) {
+            if (!error.reported) this.reportCommandError(error.message);
+            return { text: error.toolText, failed: true };
+          }
+          return { text: error instanceof Error ? error.message : String(error), failed: true };
+        }
       }) };
     });
   }
-  private async searchPublic(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome> {
+  private async searchPublic(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> {
     try {
       if (!this.running) throw new Error('Ego World is stopped.');
-      const combined = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
-      const result = await this.search.search(args, combined);
-      return { text: JSON.stringify(result), ...(result.status === 'unavailable' && { failed: true }) };
+      if (!this.canDeliverResult(ctx)) return { text: RESULT_SESSION_REQUIRED, failed: true };
+      const combined = ctx.signal ? AbortSignal.any([ctx.signal, this.lifetime.signal]) : this.lifetime.signal;
+      const result = await this.search.search(validate('search', args), combined);
+      combined.throwIfAborted();
+      return await this.externalOutcome('ego_search', { text: JSON.stringify(result), ...(result.status === 'unavailable' && { failed: true }) }, ctx);
     } catch (error) {
       return { text: error instanceof Error ? error.message : String(error), failed: true };
+    }
+  }
+  private canDeliverResult(ctx: ToolCallContext): boolean {
+    return typeof ctx.queueExternalEvents === 'function' && typeof this.host?.drainPendingEvents === 'function';
+  }
+  private async externalOutcome(tool: string, outcome: ToolOutcome, ctx: ToolCallContext): Promise<ToolOutcome> {
+    const host = this.host;
+    if (!host) return { text: 'Ego result could not be delivered because the World is stopped.', failed: true };
+    const queue = ctx.queueExternalEvents;
+    if (!queue || typeof host.drainPendingEvents !== 'function') return { text: RESULT_SESSION_REQUIRED, failed: true };
+    const resultId = randomUUID();
+    try {
+      const event = await host.pushEvent({ type: 'ego.result', source: this.id, senderKey: this.id,
+        ts: nowIso(this.options.timezone), origin: 'external',
+        text: `${tool} result ${resultId}\n${outcome.text}`, blobs: outcome.blobs,
+        meta: { tool, resultId, callId: ctx.callId } }, { trigger: 'piggyback' });
+      if (event.contextDelivery === 'archive-only') return { text: 'Ego result was archived. Enable Ego events to receive results.', failed: true };
+      // Only move this result into the current tool round. Leave unrelated batches on the bus.
+      queue(await host.drainPendingEvents(pending => pending.cursor === event.cursor));
+      return { text: `See external event ego.result ${resultId} for ${tool}.`, ...(outcome.failed && { failed: true }) };
+    } catch (error) {
+      this.reportCommandError(`Could not deliver ${tool} result: ${String(error)}`);
+      return { text: 'Ego completed the command but could not deliver its result. Check the World panel before retrying.', failed: true };
     }
   }
   private async wait(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome> {
     try {
       if (!this.running) throw new Error('Ego World is stopped.');
+      args = validate('wait', args);
       if (typeof args.seconds !== 'number' || !Number.isFinite(args.seconds) || args.seconds < 0 || args.seconds > 60) throw new Error('seconds must be a finite number from 0 to 60.');
       const combined = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
       combined.throwIfAborted();
@@ -157,6 +207,23 @@ export class EgoWorld implements World {
   private canCheckEvaluation(): boolean {
     return this.canDiagnoseEvaluation() && /^p[1-9][0-9]*$/.test(this.saved.evaluation?.page ?? '') && !this.saved.evaluationRecoveryBlocked;
   }
+  private pausedToolMessage(): string {
+    let hint = 'Check the browser. The operator must resume in the World panel.';
+    if (this.canRecoverMissingSpace() && (this.recoveryTimer || this.recoveringSpace)) {
+      hint = 'Automatic Space recovery is pending. Keep Ego and its helper available; do not repeat browser operations.';
+    } else if (this.canCheckEvaluation() && (this.controlTimer || this.checkingControl)) {
+      hint = 'Automatic recovery is checking agent control and the timed-out page snapshot. No panel resume is needed when diagnosis succeeds.';
+    } else if (this.canCheckControl() && (this.controlTimer || this.checkingControl)) {
+      hint = 'Control is checked automatically. Return control in Ego after a handoff, or wait for the control check. The World panel is an alternative.';
+    }
+    if (this.canDiagnoseEvaluation()) {
+      hint += '\nUse ego_tabs or ego_read for read-only diagnosis. Use ego_wait for simple delays; elapsed time alone does not clear this pause.';
+    }
+    return `Ego paused (${publicFailureCode(this.saved.code, 'UNCERTAIN')}). ${hint} Do not replay the failed operation.`;
+  }
+  private disconnectedToolMessage(): string {
+    return `Ego is not connected (${publicFailureCode(this.saved.code, 'EGO_BROWSER_UNAVAILABLE')}). Check the connection in the World panel and reconnect.`;
+  }
   webUi(language = 'zh'): WorldWebUiDecl {
     const zh = language.startsWith('zh');
     return {
@@ -172,7 +239,7 @@ export class EgoWorld implements World {
       invoke: async (panel, method, args) => {
         if (panel === 'search') return this.invokeSearchPanel(method, args, zh);
         if (panel !== 'control') throw new Error('Unknown panel');
-        if (method === 'status') return this.helper.probe().then(online => { this.helperOnline = online; return this.status(); });
+        if (method === 'status') return this.helper.status().then(status => { this.helperStatus = status; return this.status(); });
         // Invalidate queued/in-flight probes before waiting for the serial command queue.
         if (method === 'stop-helper') {
           this.clearSpaceRecovery(); this.clearControlCheck();
@@ -187,12 +254,12 @@ export class EgoWorld implements World {
             this.clearSpaceRecovery();
             this.clearControlCheck();
             if (this.transport?.selected === 'helper') this.clearPlaybackKeepalive();
-            await this.helper.stop(); this.helperOnline = false;
+            await this.helper.stop(); this.helperStatus = 'offline';
             if (this.transport?.selected === 'helper') {
               this.cancelWatch(); this.connected = false;
               if (!this.saved.halted) { this.saved.code = 'EGO_HELPER_UNAVAILABLE'; this.saved.reason = 'The operator stopped the ordinary-permission helper.'; await this.save(); }
             }
-            await this.event('state', 'The operator stopped the ordinary-permission helper.', true);
+            await this.event('state', 'The operator stopped the ordinary-permission helper.', 'internal');
           } else if (method === 'open-helper-folder') {
             if (!this.launcherFile || process.platform !== 'win32') throw new Error(zh ? '请先生成启动脚本' : 'Generate the launcher first');
             await new Promise<void>((done, fail) => {
@@ -205,7 +272,7 @@ export class EgoWorld implements World {
             await this.command(this.saved.spaceId ? 'resume' : 'connect', {}, undefined, true);
             this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.saved.spaceMissing = false; this.saved.uncertain = false; this.saved.observationTimeout = false; this.saved.evaluation = undefined; this.saved.evaluationRecoveryBlocked = undefined; this.connected = true;
             this.clearControlCheck();
-            await this.save(); await this.event('state', 'The operator resumed this Ego Space.', true);
+            await this.save(); await this.event('state', 'The operator resumed this Ego Space.', 'internal');
           } else if (method === 'connect') {
             if (this.saved.halted) throw new Error(this.saved.reason);
             await this.connect();
@@ -253,13 +320,16 @@ export class EgoWorld implements World {
     throw new Error('Unknown search panel method.');
   }
   status() { return { running: this.running, connected: this.connected, ...this.saved, spaceName: this.spaceName, watching: this.watch?.page ?? null,
+    lastCommandError: this.lastCommandError,
     autoRecovering: this.running && this.canRecoverMissingSpace() && (!!this.recoveryTimer || this.recoveringSpace),
     checkingControl: this.running && this.canCheckControl() && (!!this.controlTimer || this.checkingControl),
     sampling: this.watch ? this.samplingStatus(this.watch) : null,
     connectionMode: this.options.cfg.connectionMode || 'auto', transport: this.transport?.selected ?? 'direct',
-    helperOnline: this.helperOnline, helperDir: this.helperDir, launcherFile: this.launcherFile, canPrepareHelper: process.platform === 'win32' }; }
+    helperOnline: this.helperStatus === 'ready', helperOutdated: this.helperStatus === 'incompatible',
+    helperDir: this.helperDir, launcherFile: this.launcherFile, canPrepareHelper: process.platform === 'win32' }; }
   async start(host: WorldHost): Promise<void> {
     this.host = host; this.running = true; this.lifetime = new AbortController();
+    this.lastCommandError = undefined;
     try {
       const saved = JSON.parse((await readFile(this.stateFile, 'utf8')).replace(/^\uFEFF/, ''));
       if (saved.spaceName === this.spaceName) {
@@ -274,10 +344,10 @@ export class EgoWorld implements World {
           lastUnknownEvaluation: saved.lastUnknownEvaluation && typeof saved.lastUnknownEvaluation === 'object' ? saved.lastUnknownEvaluation : undefined };
       }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.saved = { halted: true, reason: `Cannot read Ego state: ${String(error)}` }; } }
-    if (this.saved.halted && !this.canRecoverMissingSpace()) { this.scheduleControlCheck(); await this.event('state', `Ego paused: ${this.saved.reason}`, true); return; }
+    if (this.saved.halted && !this.canRecoverMissingSpace()) { this.scheduleControlCheck(); await this.event('state', `Ego paused: ${this.saved.reason}`, 'external'); return; }
     await this.serial(async () => {
       try { const missing = this.canRecoverMissingSpace(); await this.connect(missing, missing); }
-      catch (error) { this.connected = false; await this.event('state', `Ego connection failed: ${String(error)}`, true); }
+      catch (error) { this.connected = false; await this.event('state', `Ego connection failed: ${String(error)}`, 'external'); }
     });
   }
   async stop(): Promise<void> {
@@ -389,14 +459,14 @@ export class EgoWorld implements World {
           if (!receipt.error && !receipt.uncertain && receipt.spaceId === id && receipt.value?.control === 'agent') {
             this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.saved.uncertain = false; this.saved.observationTimeout = false;
             this.connected = true; this.clearControlCheck();
-            await this.save(); await this.event('state', 'Ego confirmed agent control of the same Space. Browser operations are available again. The failed operation was not replayed; video watching has not resumed. Refresh the page snapshot before using refs.', true);
+            await this.save(); await this.event('state', 'Ego confirmed agent control of the same Space. Browser operations are available again. The failed operation was not replayed; video watching has not resumed. Refresh the page snapshot before using refs.', 'internal');
             return;
           }
           if (receipt.value?.control === 'inactive' || /EGO_TASK_SPACE_(INACTIVE|NOT_FOUND|NOT_SELECTED|NAME_IN_USE|UNAVAILABLE)|EGO_TASK_HOST_DISCONNECTED/.test(receipt.code ?? '')) {
             // A control check must never trigger the separate missing-Space recreation path.
             this.saved.code = receipt.code ?? 'EGO_TASK_SPACE_INACTIVE'; this.saved.reason = receipt.error ?? 'This Space is no longer assigned to the agent.';
             this.saved.observationTimeout = false; this.saved.spaceMissing = false; this.clearControlCheck(); await this.save();
-            await this.event('state', `Ego remains paused: ${this.saved.code}: ${this.saved.reason}`, true); return;
+            await this.event('state', `Ego remains paused: ${this.saved.code}: ${this.saved.reason}`, 'external'); return;
           }
         } catch { /* Preserve the original stop. A failed observation cannot authorize resuming. */ }
         finally {
@@ -417,7 +487,7 @@ export class EgoWorld implements World {
         // Keep the original timeout; never route an uncertain script into Space recreation.
         this.saved.evaluationRecoveryBlocked = receipt.code ?? 'EGO_TASK_SPACE_INACTIVE';
         this.clearControlCheck(); await this.save();
-        await this.event('state', `Ego evaluation recovery remains paused: ${this.saved.evaluationRecoveryBlocked}. The original script outcome is still unknown.`, true);
+        await this.event('state', `Ego evaluation recovery remains paused: ${this.saved.evaluationRecoveryBlocked}. The original script outcome is still unknown.`, 'external');
         return false;
       }
       return valid(receipt) && receipt.value?.control === 'agent';
@@ -438,7 +508,7 @@ export class EgoWorld implements World {
       this.saved = previous; await this.save(); return;
     }
     this.connected = true; this.clearControlCheck();
-    await this.event('state', `Ego automatically restored browser operations after confirming agent control of the same Space and reading page ${this.saved.lastUnknownEvaluation.page}. ${UNKNOWN_EVALUATION_HINT} Refresh the snapshot before using refs.`, true);
+    await this.event('state', `Ego automatically restored browser operations after confirming agent control of the same Space and reading page ${this.saved.lastUnknownEvaluation.page}. ${UNKNOWN_EVALUATION_HINT} Refresh the snapshot before using refs.`, 'internal');
   }
   private canRecoverMissingSpace(): boolean {
     return this.saved.halted && this.saved.spaceMissing === true && this.saved.code === 'EGO_TASK_SPACE_NOT_FOUND'
@@ -470,7 +540,7 @@ export class EgoWorld implements World {
       this.connected = true; this.saved.halted = false; this.saved.reason = ''; this.saved.code = undefined; this.saved.spaceMissing = false; this.saved.uncertain = false; this.saved.observationTimeout = false; this.saved.evaluation = undefined; this.saved.evaluationRecoveryBlocked = undefined;
       this.clearControlCheck();
       this.clearSpaceRecovery();
-      await this.save(); await this.event('state', `Ego connected. Space ${this.saved.spaceId} (${this.spaceName}).${byName ? ` ${automatic ? 'Automatically' : 'The operator'} re-established the missing Space by its dedicated name. ${SPACE_RESET_HINT}` : ''}${this.saved.lastUnknownEvaluation ? ` ${UNKNOWN_EVALUATION_HINT}` : ''}`, true);
+      await this.save(); await this.event('state', `Ego connected. Space ${this.saved.spaceId} (${this.spaceName}).${byName ? ` ${automatic ? 'Automatically' : 'The operator'} re-established the missing Space by its dedicated name. ${SPACE_RESET_HINT}` : ''}${this.saved.lastUnknownEvaluation ? ` ${UNKNOWN_EVALUATION_HINT}` : ''}`, 'internal');
     } catch (error) {
       if (!byName && this.canRecoverMissingSpace() && this.running && !this.lifetime.signal.aborted && !signal?.aborted) {
         await this.connect(true, true, signal); return;
@@ -480,13 +550,29 @@ export class EgoWorld implements World {
     } finally { if (automatic) this.recoveringSpace = false; }
   }
   private async command(operation: string, args: Record<string, unknown>, signal?: AbortSignal, operatorResume = false, byName = false): Promise<any> {
+    const evaluate = operation === 'evaluate';
+    // The session can keep a stale handler, including while a command is queued.
+    if (evaluate && this.options.cfg.allowPageScripts !== true) {
+      throw new BrowserCommandError(PAGE_SCRIPTS_DISABLED, PAGE_SCRIPTS_DISABLED, true);
+    }
     const diagnostic = this.isEvaluationDiagnostic(operation);
-    if (this.saved.halted && !operatorResume && !diagnostic) throw new Error(`Ego paused: ${this.saved.reason}`);
+    if (this.saved.halted && !operatorResume && !diagnostic) throw new BrowserCommandError(`Ego paused: ${this.saved.reason}`, this.pausedToolMessage(), true);
     signal?.throwIfAborted();
     const combined = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
-    const receipt: BridgeReceipt = normalizeFailure(await this.bridge.run(operation, { ...args, restoreMinimized: this.options.cfg.restoreMinimized, spaceId: byName ? undefined : this.saved.spaceId, spaceName: this.spaceName }, combined));
+    let receipt: BridgeReceipt;
+    try {
+      receipt = normalizeFailure(await this.bridge.run(operation, {
+        ...args, ...(evaluate && { allowPageScripts: true }), restoreMinimized: this.options.cfg.restoreMinimized,
+        spaceId: byName ? undefined : this.saved.spaceId, spaceName: this.spaceName,
+      }, combined));
+    } catch (error) {
+      throw new BrowserCommandError(String(error), 'Ego command failed (EGO_OPERATION_FAILED). Check the browser and the World panel before retrying.');
+    }
     // A failed diagnostic cannot erase, weaken or replace the original uncertain stop.
-    if (diagnostic && (receipt.error || receipt.uncertain || receipt.spaceId !== this.saved.spaceId)) throw new Error(`Ego diagnostic failed: ${receipt.code ?? ''}: ${receipt.error ?? 'Uncertain or mismatched Space receipt'}. The original evaluation pause is unchanged.`);
+    if (diagnostic && (receipt.error || receipt.uncertain || receipt.spaceId !== this.saved.spaceId)) {
+      throw new BrowserCommandError(`Ego diagnostic failed: ${receipt.code ?? ''}: ${receipt.error ?? 'Uncertain or mismatched Space receipt'}`,
+        `Ego diagnostic failed (${publicFailureCode(receipt.code)}). The evaluation pause remains in effect. Do not replay the timed-out script.`);
+    }
     if (receipt.spaceId && !receipt.error) {
       if (receipt.spaceId !== this.saved.spaceId) this.clearPlaybackKeepalive();
       this.saved.spaceId = receipt.spaceId; await this.save();
@@ -499,7 +585,8 @@ export class EgoWorld implements World {
           throw new Error(`${receipt.code}: ${receipt.error}`);
         }
         this.saved.halted = false; this.saved.reason = receipt.error; this.saved.code = receipt.code; this.cancelWatch(); this.connected = false;
-        await this.save(); await this.event('state', `Ego connection unavailable: ${receipt.code}: ${receipt.error}`, true);
+        await this.save(); await this.event('state', `Ego connection unavailable: ${receipt.code}: ${receipt.error}`, 'external');
+        throw new BrowserCommandError(`${receipt.code}: ${receipt.error}`, this.disconnectedToolMessage(), true);
       } else if (receipt.uncertain || receipt.code === 'EGO_PAGE_EVALUATION_TIMED_OUT' || STOP_CODES.test(receipt.code ?? receipt.error)) {
         this.clearPlaybackKeepalive();
         this.saved.halted = true; this.saved.reason = `${receipt.code ?? 'UNCERTAIN'}: ${receipt.error}`; this.saved.code = receipt.code ?? 'UNCERTAIN';
@@ -510,19 +597,31 @@ export class EgoWorld implements World {
         this.clearControlCheck(); this.scheduleControlCheck();
         this.saved.spaceMissing = receipt.code === 'EGO_TASK_SPACE_NOT_FOUND' && !receipt.uncertain; this.cancelWatch(); this.connected = false;
         if (!this.saved.spaceMissing) this.clearSpaceRecovery();
-        await this.save(); await this.event('state', `Ego stopped: ${this.saved.reason}`, true);
+        await this.save(); await this.event('state', `Ego stopped: ${this.saved.reason}`, 'external');
         if (this.canRecoverMissingSpace() && this.running && !combined.aborted) {
           this.scheduleSpaceRecovery();
           if (!byName && !operatorResume && operation !== 'connect') {
             try { await this.connect(true, true, signal); }
-            catch (error) { throw new Error(`${receipt.code}: ${receipt.error}\nAutomatic Space recovery failed: ${String(error)}`); }
-            throw new Error(`${receipt.code}: ${receipt.error}\nThe missing Space was automatically re-established. ${SPACE_RESET_HINT}`);
+            catch (error) {
+              throw new BrowserCommandError(`Automatic Space recovery failed: ${String(error)}`,
+                `Automatic Space recovery failed. ${this.pausedToolMessage()}`);
+            }
+            throw new BrowserCommandError(`${receipt.code}: ${receipt.error}`,
+              `Ego command failed (EGO_TASK_SPACE_NOT_FOUND). The missing Space was automatically re-established. ${SPACE_RESET_HINT}`, true);
           }
         }
+        throw new BrowserCommandError(this.saved.reason, this.pausedToolMessage(), true);
       }
-      throw new Error(`${receipt.code ? `${receipt.code}: ` : ''}${receipt.error}${this.canCheckEvaluation() ? '\nAutomatic recovery will check control and the timed-out page snapshot. Do not replay the script; successful diagnosis restores browser tools without a panel resume.' : ''}`);
+      const page = operation === 'open' && typeof receipt.pageLabel === 'string' && /^p[1-9][0-9]*$/.test(receipt.pageLabel) ? receipt.pageLabel : undefined;
+      let hint = 'Check the browser and the World panel before retrying. Use ego_tabs for current page labels.';
+      if (page) hint = `Use ego_read or ego_close with page=${page}, or list current pages with ego_tabs.`;
+      if (receipt.code === 'EGO_DOWNLOAD_START_TIMEOUT') {
+        hint = 'The download outcome is unknown. Check ego_read or ego_tabs. If you find the intended file URL, use ego_download with url. Do not repeat the click blindly.';
+      }
+      throw new BrowserCommandError(`${receipt.code ? `${receipt.code}: ` : ''}${receipt.error}`,
+        `Ego command failed (${publicFailureCode(receipt.code)}). ${hint}`);
     }
-    if (this.transport?.selected === 'helper') this.helperOnline = true;
+    if (this.transport?.selected === 'helper') this.helperStatus = 'ready';
     this.playbackRoundRetry = 0;
     this.schedulePlaybackKeepalive();
     return receipt.value;
@@ -532,7 +631,7 @@ export class EgoWorld implements World {
     this.clearPlaybackKeepalive();
     this.saved.halted = true; this.saved.reason = 'Control was handed to the operator.'; this.saved.code = 'EGO_TASK_SPACE_USER_IN_CONTROL'; this.connected = false;
     this.saved.uncertain = false; this.saved.observationTimeout = false; this.clearControlCheck(); this.scheduleControlCheck();
-    await this.save(); await this.event('state', this.saved.reason, true);
+    await this.save(); await this.event('state', this.saved.reason, 'internal');
     return { text: this.saved.reason };
   }
   private cancelWatch(): void {
@@ -552,8 +651,14 @@ export class EgoWorld implements World {
         for (const [key, { target }] of this.playing) if (target.page === args.page) this.playing.delete(key);
         this.schedulePlaybackKeepalive();
       }
+      if (operation === 'bilibili' && args.action === 'comments' && ['target-unavailable', 'error'].includes(value?.status)) {
+        const { reason, error, ...details } = value;
+        this.reportCommandError(`Bilibili comments: ${String(error ?? reason ?? value.status)}`);
+        const hint = value.status === 'target-unavailable' ? { reason: 'Check the video or provide a matching aid or bvid.' }
+          : { error: 'Check the Bilibili tab and the World panel before retrying.' };
+        return { ...this.outcome({ ...details, ...hint }), failed: true };
+      }
       const result = this.outcome(value, operation === 'read' ? Number(args.offset ?? 0) : 0, Number(args.maxChars ?? this.options.cfg.maxChars));
-      if (operation === 'bilibili' && args.action === 'comments' && ['target-unavailable', 'error'].includes(value?.status)) result.failed = true;
       if (diagnostic) result.text += '\nRead-only diagnosis only. The page-evaluation pause remains; pending JavaScript may still produce late effects. Do not repeat the timed-out script. Background diagnosis restores operations only after control and page checks pass; reading alone does not clear this pause.';
       return result;
     }
@@ -569,7 +674,7 @@ export class EgoWorld implements World {
       watch.pendingOverride = { ...watch.override, ...watch.pendingOverride, ...override };
       const observation = { phase: 'tuning', watching: true, ...this.samplingStatus(watch), appliesAtBatch: watch.batch + 1,
         note: 'Accepted for the next batch. The current batch and queued scenes are retained; the last frame becomes the next batch boundary.' };
-      await this.event('video.state', JSON.stringify({ page: watch.page, action, observation }), true);
+      await this.event('video.state', JSON.stringify({ page: watch.page, action, observation }), 'internal');
       return this.outcome({ observation });
     }
     if (action === 'play' && this.watch?.backpressured && this.watch.page === args.page) {
@@ -590,7 +695,8 @@ export class EgoWorld implements World {
       else this.playing.delete(key);
       this.schedulePlaybackKeepalive();
     }
-    if (!['inspect', 'look'].includes(action)) await this.event('video.state', JSON.stringify({ page: args.page, action, time: value.time, paused: value.paused }), true);
+    if (!['inspect', 'look'].includes(action)) await this.event('video.state', JSON.stringify({ page: args.page, action,
+      time: Number.isFinite(value.time) ? value.time : undefined, paused: typeof value.paused === 'boolean' ? value.paused : undefined }), 'internal');
     if (action !== 'watch') {
       if (action === 'look') value.observation = { phase: 'snapshot', watching: this.watch?.page === args.page, danmaku: videoArgs.danmaku,
         note: 'look captures now; it does not wait to collect a time window. For several frames within 15 seconds, call watch once and wait for ego.video.scene. Repeated watch restarts sampling.' };
@@ -752,7 +858,7 @@ export class EgoWorld implements World {
           if (!this.canDeliverVideo(watch)) return;
           if (receipt && (STOP_CODES.test(receipt.code ?? receipt.error ?? '') || (receipt.spaceId && receipt.spaceId !== spaceId))) {
             this.cancelWatch();
-            await this.event('video.state', 'Video observation stopped: the original Space is unavailable or no longer under agent control.', true);
+            await this.event('video.state', 'Video observation stopped: the original Space is unavailable or no longer under agent control.', 'internal');
             return;
           }
           appMissing = receipt?.code === 'EGO_APP_NOT_FOUND';
@@ -778,8 +884,8 @@ export class EgoWorld implements World {
       const value = await this.command('video', { ...watch, action: 'play' });
       if (!value.found || value.ended || value.paused || value.source !== watch.source) { this.cancelWatch(); return; }
       watch.backpressured = false; this.updateTiming(watch, value, Date.now()); this.schedule(watch);
-      await this.event('video.state', 'Scene delivery caught up; playback and observation resumed.', true);
-    } catch (error) { this.cancelWatch(); await this.event('video.state', `Video observation stopped: ${String(error)}`, true); }
+      await this.event('video.state', 'Scene delivery caught up; playback and observation resumed.', 'internal');
+    } catch (error) { this.cancelWatch(); await this.event('video.state', `Video observation stopped: ${String(error)}`, 'external'); }
   }
   private schedule(watch: Watch): void {
     if (!this.running || this.saved.halted || this.watch !== watch) return;
@@ -794,7 +900,7 @@ export class EgoWorld implements World {
             action: observe ? 'look' : 'sample', consumeFrames: observe, holdPlayback: observe && !watch.smoothWatch });
           if (!this.running || this.watch !== watch || this.generation !== watch.generation) return;
           if (!value.found || (!value.ended && value.paused) || value.source !== watch.source || value.time < watch.lastTime - 0.02) {
-            this.cancelWatch(); await this.event('video.state', `Watching stopped: ${JSON.stringify({ page: watch.page, found: value.found, paused: value.paused, ended: value.ended, sourceChanged: value.source !== watch.source })}`, true); return;
+            this.cancelWatch(); await this.event('video.state', `Watching stopped: ${JSON.stringify({ page: watch.page, found: value.found, paused: value.paused, ended: value.ended, sourceChanged: value.source !== watch.source })}`, 'internal'); return;
           }
           if (value.samplePending) { this.updateTiming(watch, value, startedAt); this.schedule(watch); return; }
           if (value.ended) {
@@ -804,7 +910,7 @@ export class EgoWorld implements World {
             // Natural completion keeps its last scene deliverable. Explicit cancellation still invalidates it.
             watch.completed = true; this.watch = undefined; this.timer = undefined;
             if (value.time !== watch.since) this.publishScene(watch, value, true);
-            await this.event('video.state', `Playback ended; final observation generated for page=${watch.page}.`, true);
+            await this.event('video.state', `Playback ended; final observation generated for page=${watch.page}.`, 'internal');
             return;
           }
           const completed = observe || value.batchComplete;
@@ -824,7 +930,7 @@ export class EgoWorld implements World {
           if (completed && !watch.smoothWatch && this.pendingScenes.size >= MAX_PENDING_SCENES) {
             watch.backpressured = true;
             if (!value.playbackHeld) await this.command('video', { ...watch, action: 'pause', preserveFrames: true });
-            await this.event('video.state', 'Playback paused while completed mosaics wait for delivery. Observation resumes automatically after delivery; queued scenes are retained.', true);
+            await this.event('video.state', 'Playback paused while completed mosaics wait for delivery. Observation resumes automatically after delivery; queued scenes are retained.', 'internal');
             return;
           }
           if (value.playbackHeld) {
@@ -835,7 +941,7 @@ export class EgoWorld implements World {
           }
           this.schedule(watch);
         } catch (error) {
-          this.cancelWatch(); await this.event('video.state', `Video observation stopped: ${String(error)}`, true);
+          this.cancelWatch(); await this.event('video.state', `Video observation stopped: ${String(error)}`, 'external');
         }
       });
     }, Math.max(0, watch.nextSampleAt - Date.now()));
@@ -864,8 +970,12 @@ export class EgoWorld implements World {
     if (image?.mime && this.host?.modelFacts?.accepts(image.mime) === false) result.text += '\nThe configured model does not accept this image MIME. It can read the returned subtitles; choose a vision-capable model to interpret the frames.';
     return result;
   }
-  private async event(type: string, text: string, internal = false): Promise<void> {
-    await this.host?.pushEvent({ type: `ego.${type}`, source: this.id, senderKey: this.id, ts: nowIso(this.options.timezone), text, ...(internal ? { origin: 'internal' as const } : {}) }, { trigger: 'flush' });
+  private async event(type: string, text: string, origin: EventOrigin): Promise<void> {
+    await this.host?.pushEvent({ type: `ego.${type}`, source: this.id, senderKey: this.id, ts: nowIso(this.options.timezone), text, origin }, { trigger: 'flush' });
+  }
+  private reportCommandError(diagnostic: string): void {
+    this.lastCommandError = diagnostic;
+    this.host?.log.info('Ego command failed.', { diagnostic });
   }
 }
 export function normalizeUrl(input: string): string {
@@ -878,6 +988,11 @@ function validate(operation: string, input: Record<string, unknown>): Record<str
   const args = { ...input };
   const spec = EGO_TOOL_DECLS.find(t => t.name === `ego_${operation}`)!;
   const properties = spec.parameters.properties as Record<string, { type?: string }>;
+  const extra = Object.keys(args).find(key => !Object.hasOwn(properties, key));
+  if (extra !== undefined) throw new Error(`Unknown parameter: ${extra}`);
+  for (const [key, property] of Object.entries(properties)) {
+    if (property.type === 'boolean' && args[key] !== undefined && typeof args[key] !== 'boolean') throw new Error(`${key} must be a boolean.`);
+  }
   for (const key of spec.parameters.required as string[]) {
     if (args[key] === undefined) throw new Error(`${key} is required.`);
     if (properties[key]?.type === 'string' && (typeof args[key] !== 'string' || (key !== 'text' && !String(args[key]).trim()))) throw new Error(`${key} must be a non-empty string.`);
@@ -889,7 +1004,6 @@ function validate(operation: string, input: Record<string, unknown>): Record<str
     if (!String(args.handle).startsWith('mem:') || /[\\:\x00-\x1f]/.test(path) || path.split('/').some(part => !part || part.startsWith('.'))) {
       throw new Error('Use a mem: handle for a workspace file, e.g. mem:blobs/photo.png.');
     }
-    if (args.chooser !== undefined && typeof args.chooser !== 'boolean') throw new Error('chooser must be a boolean.');
   }
   if (operation === 'download') {
     const targets = [args.selector, args.url].filter(value => value !== undefined);
@@ -902,8 +1016,8 @@ function validate(operation: string, input: Record<string, unknown>): Record<str
   if (operation === 'video') {
     if (!['inspect', 'play', 'pause', 'seek', 'look', 'watch', 'tune', 'exit'].includes(String(args.action))) throw new Error('Invalid video action.');
     if (args.action === 'seek' && args.time === undefined) throw new Error('seek requires time in seconds.');
-    if (args.danmaku !== undefined && (typeof args.danmaku !== 'boolean' || !['watch', 'tune', 'look'].includes(String(args.action)))) {
-      throw new Error('danmaku must be a boolean on watch, tune or look.');
+    if (args.danmaku !== undefined && !['watch', 'tune', 'look'].includes(String(args.action))) {
+      throw new Error('danmaku is only available on watch, tune or look.');
     }
   }
   if (operation === 'bilibili' && (!['search', 'related', 'comments'].includes(String(args.action)) || (args.action === 'search' && (typeof args.query !== 'string' || !args.query.trim())))) throw new Error('Invalid Bilibili action or missing search query.');

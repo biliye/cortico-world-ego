@@ -76,19 +76,23 @@ export async function videoOperation(args) {
         if (action === 'sample') return result;
         const frameCount = cache.frames.length;
         const tileHeight = height + 26;
-        // Five and seven frames need one empty cell to avoid a single long strip.
+        // Avoid long strips for five and seven frames. Keep the old 3×3 grid eligible for seven and eight.
         const allowStrip = frameCount !== 5 && frameCount !== 7;
+        const maxSlots = frameCount === 7 || frameCount === 8 ? 9 : frameCount === 5 ? 6 : frameCount;
         const firstColumnCount = allowStrip ? 1 : 2;
         const lastColumnCount = allowStrip ? frameCount : frameCount - 1;
         let cols = firstColumnCount;
         let rows = Math.ceil(frameCount / cols);
+        let longestEdge = Math.max(cols * width, rows * tileHeight);
         for (let candidateCols = cols + 1; candidateCols <= lastColumnCount; candidateCols++) {
           const candidateRows = Math.ceil(frameCount / candidateCols);
           const slots = candidateCols * candidateRows;
-          const longestEdge = Math.max(candidateCols * width, candidateRows * tileHeight);
-          if (slots < cols * rows || (slots === cols * rows && longestEdge < Math.max(cols * width, rows * tileHeight))) {
+          if (slots > maxSlots) continue;
+          const candidateEdge = Math.max(candidateCols * width, candidateRows * tileHeight);
+          if (candidateEdge < longestEdge || (candidateEdge === longestEdge && slots < cols * rows)) {
             cols = candidateCols;
             rows = candidateRows;
+            longestEdge = candidateEdge;
           }
         }
         const grid = document.createElement('canvas'); grid.width = cols * width; grid.height = rows * tileHeight;

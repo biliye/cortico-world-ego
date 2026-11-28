@@ -50,6 +50,22 @@ it('uses a wider layout for tall frames to shorten the longest canvas edge', asy
   expect(scene.frameCount).toBe(8);
   expect(f.canvases.at(-1)).toMatchObject({ width: 4 * 640, height: 2 * 986 });
 });
+it.each([
+  { frames: 7, height: 640 },
+  { frames: 8, height: 640 },
+  { frames: 8, height: 480 },
+])('uses a 3 by 3 grid for $frames 640 by $height frames when it shortens the longest edge', async ({ frames, height }) => {
+  const f = fixture();
+  f.video.videoHeight = height;
+  const options = { maxFrames: 9, collecting: true };
+  for (let time = 0; time < frames - 1; time++) await f.capture(time, 'sample', options);
+  const scene = await f.capture(frames - 1, 'look', options);
+  expect(scene.frameCount).toBe(frames);
+  const grid = f.canvases.at(-1)!;
+  expect(grid).toMatchObject({ width: 1920, height: 3 * (height + 26) });
+  expect(grid.draws).toHaveLength(frames);
+  expect(grid.draws.every(([, , width, drawnHeight]) => width === 640 && drawnHeight === height)).toBe(true);
+});
 it('keeps the shared boundary when the next interval uses a different number of frames', async () => {
   const f = fixture();
   await f.capture(0, 'look'); await f.capture(5); const sample = await f.capture(10);

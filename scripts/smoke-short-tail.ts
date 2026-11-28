@@ -5,6 +5,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { EgoWorld } from '../src/world.ts';
 import { CliBridge } from '../src/bridge.ts';
+import { smokeTools } from './smoke-tools.ts';
 import { EGO_DEFAULTS } from '../src/config.ts';
 import { nullLogger } from 'cortico/core/util.ts';
 import type { DeferredEventSpec, ToolOutcome, WorldHost } from 'cortico/core/types.ts';
@@ -23,19 +24,25 @@ await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
 const cfg = structuredClone(EGO_DEFAULTS); cfg.enabled = true; cfg.spaceName = process.env.CORTICO_EGO_SMOKE_SPACE || `ego-short-tail-${Date.now()}`;
 const bridge = new CliBridge({ cliFile: cfg.cliFile, dataDir: dir, timeoutMs: () => 45000 });
 const world = new EgoWorld({ cfg, dataDir: dir, botDir: dir, timezone: 'Asia/Shanghai', bridge });
+const fixtureBridge = new CliBridge({ cliFile: cfg.cliFile, dataDir: dir, timeoutMs: () => 15000,
+  runtimeUrl: new URL('./smoke-runtime.mjs', import.meta.url).href });
 const scenes: DeferredEventSpec[] = [];
 const host = { log: nullLogger(), pushEvent: async (event: any) => { evidence.events.push({ type: event.type, text: event.text }); return event; }, pushDeferred: (event: DeferredEventSpec) => { scenes.push(event); } } as unknown as WorldHost;
-async function call(name: string, args: Record<string, unknown> = {}): Promise<ToolOutcome> {
-  const raw = await world.tools().find(t => t.name === `ego_${name}`)!.handler(args, { role: 'smoke', log: nullLogger() });
-  const result = typeof raw === 'string' ? { text: raw } : raw; assert(!result.failed, result.text); return result;
-}
+const smoke = smokeTools(world, host);
+const { call } = smoke;
 const data = (value: ToolOutcome) => JSON.parse(value.text.slice(value.text.indexOf('\n') + 1));
 try {
-  await world.start(host); evidence.status = world.status(); console.log(JSON.stringify({ spaceId: world.status().spaceId, spaceName: cfg.spaceName }));
+  await world.start(smoke.host); evidence.status = world.status(); console.log(JSON.stringify({ spaceId: world.status().spaceId, spaceName: cfg.spaceName }));
   assert(world.status().connected, JSON.stringify(world.status()));
   const page = data(await call('open', { url: `http://127.0.0.1:${(server.address() as any).port}/` })).page;
-  const ready = await bridge.run('evaluate', { spaceId: world.status().spaceId, page, expression: `(async()=>{const end=Date.now()+12000;while(Date.now()<end){if(window.fixtureReady&&document.querySelector('video').readyState>=2)return true;await new Promise(r=>setTimeout(r,100));}throw new Error('video not decoded')})()` });
-  assert(!ready.error, ready.error); assert.equal(ready.value, true);
+  const readyDeadline = Date.now() + 12000;
+  let ready = false;
+  while (!ready && Date.now() < readyDeadline) {
+    const response = await fixtureBridge.run('fixture-video-ready', { spaceId: world.status().spaceId, page });
+    assert(!response.error, response.error); ready = response.value === true;
+    if (!ready) await new Promise(r => setTimeout(r, 100));
+  }
+  assert(ready, 'Synthetic video did not decode');
   await call('video', { page, action: 'pause' }); await call('video', { page, action: 'seek', time: 2 });
   const start = await call('video', { page, action: 'watch' });
   const collecting = data(start);

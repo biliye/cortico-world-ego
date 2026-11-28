@@ -34,6 +34,7 @@ it('authenticates local requests and rejects cross-origin requests and unknown o
   expect((await fetch(`${url}/health`)).status).toBe(401);
   expect((await fetch(`${url}/health`, { headers: { authorization: `Bearer ${token}`, origin: 'https://example.com' } })).status).toBe(403);
   expect((await fetch(`${url}/run`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ operation: 'node', args: {} }) })).status).toBe(400);
+  expect((await fetch(`${url}/run`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ operation: 'evaluate', args: { page: 'p1', expression: 'document.title' } }) })).status).toBe(400);
   expect(await new HelperBridge(dir, () => 1000).probe()).toBe(true);
   expect((await new HelperBridge(dir, () => 1000).run('tabs', {})).value).toBe(null); expect(called).toBe(1);
 });

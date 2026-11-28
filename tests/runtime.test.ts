@@ -37,6 +37,12 @@ beforeEach(async () => {
   vi.stubGlobal('taskSpace', async () => task);
 });
 afterEach(async () => { vi.unstubAllGlobals(); if (!dir.startsWith(join(process.cwd(), '.test-data-'))) throw new Error('Unsafe cleanup'); await rm(dir, { recursive: true, force: true }); });
+it('rejects the removed evaluate operation before calling the browser evaluator', async () => {
+  page.evaluate = vi.fn();
+  const result = await execute({ operation: 'evaluate', args: { page: 'p1', expression: 'document.title' } });
+  expect(result.error).toContain('Unsupported operation');
+  expect(page.evaluate).not.toHaveBeenCalled();
+});
 it('resolves the page target before restoring a minimized window, then uses official screenshot', async () => {
   const result = await execute({ operation: 'shot', args: { page: 'p1', restoreMinimized: true, screenshotFile: join(dir, 'shot.png') } });
   expect(result.error).toBeUndefined(); expect(result.value.restoredWindow).toBe(true);
@@ -116,7 +122,7 @@ it('returns stable control-stop codes to the World', async () => {
 it('keeps unstructured page diagnostics out of transport error classification', async () => {
   const message = 'Page diagnostic mentioning EGO_TASK_SPACE_NOT_FOUND and ENOENT';
   page.evaluate = vi.fn().mockRejectedValue(new Error(message));
-  const result = await execute({ operation: 'evaluate', args: { page: 'p1', expression: 'document.title' } });
+  const result = await execute({ operation: 'bilibili', args: { page: 'p1', action: 'related' } });
   expect(normalizeFailure(result)).toMatchObject({ spaceId: 1, error: message, code: 'EGO_OPERATION_FAILED', uncertain: false });
 });
 it('preserves recognition of a legacy missing Space during selection', async () => {
@@ -243,7 +249,7 @@ it('never creates a replacement or claims an ended task during a control check',
 });
 it('returns a serializable null when page JavaScript returns undefined', async () => {
   page.evaluate = async () => undefined;
-  const result = await execute({ operation: 'evaluate', args: { page: 'p1', expression: 'undefined' } });
+  const result = await execute({ operation: 'bilibili', args: { page: 'p1', action: 'related' } });
   expect(JSON.parse(JSON.stringify(result)).value).toBe(null);
 });
 
@@ -320,13 +326,13 @@ it('preserves responsive pending-Promise timeout metadata without claiming the s
   page.evaluate = async () => { throw Object.assign(new Error('page.evaluate timed out after 15000ms; evaluation still pending'), {
     code: 'EGO_PAGE_EVALUATION_TIMED_OUT', timeoutMs: 15000, executionStopped: false, pageResponsive: true, mayHaveLateEffects: true,
   }); };
-  const result = await execute({ operation: 'evaluate', args: { page: 'p1', expression: 'new Promise(r => setTimeout(r, 20000))' } });
+  const result = await execute({ operation: 'bilibili', args: { page: 'p1', action: 'related' } });
   expect(JSON.parse(JSON.stringify(result))).toMatchObject({ code: 'EGO_PAGE_EVALUATION_TIMED_OUT', uncertain: true,
     evaluation: { page: 'p1', timeoutMs: 15000, executionStopped: false, pageResponsive: true, mayHaveLateEffects: true } });
 });
 it('keeps unknown evaluation-timeout metadata unknown and conservatively uncertain', async () => {
   page.evaluate = async () => { throw Object.assign(new Error('page evaluation timed out'), { code: 'EGO_PAGE_EVALUATION_TIMED_OUT' }); };
-  const result = await execute({ operation: 'evaluate', args: { page: 'p1', expression: 'pending()' } });
+  const result = await execute({ operation: 'bilibili', args: { page: 'p1', action: 'related' } });
   expect(result.uncertain).toBe(true); expect(JSON.parse(JSON.stringify(result)).evaluation).toEqual({ page: 'p1' });
 });
 it('can read the same managed page after evaluation times out without replaying or taking over', async () => {
@@ -334,7 +340,7 @@ it('can read the same managed page after evaluation times out without replaying 
   page.snapshot = vi.fn(async () => 'current page snapshot');
   const select = vi.fn(async () => task), takeover = vi.fn(), claim = vi.fn();
   vi.stubGlobal('taskSpace', select); vi.stubGlobal('takeOverTaskSpace', takeover); vi.stubGlobal('claimTaskSpace', claim);
-  expect(await execute({ operation: 'evaluate', args: { spaceId: 1, page: 'p1', expression: 'pending()' } })).toMatchObject({ code: 'EGO_PAGE_EVALUATION_TIMED_OUT' });
+  expect(await execute({ operation: 'bilibili', args: { spaceId: 1, page: 'p1', action: 'related' } })).toMatchObject({ code: 'EGO_PAGE_EVALUATION_TIMED_OUT' });
   expect(await execute({ operation: 'read', args: { spaceId: 1, page: 'p1', fullPage: true } })).toMatchObject({ spaceId: 1, value: 'current page snapshot' });
   expect(select.mock.calls).toEqual([[1], [1]]); expect(page.evaluate).toHaveBeenCalledTimes(1);
   expect(page.snapshot).toHaveBeenCalledWith({ scope: 'full_page' });

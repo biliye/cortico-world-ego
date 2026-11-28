@@ -96,7 +96,6 @@ export async function execute({ operation, args }) {
         case 'download': value = await downloadFile(task, page, args); break;
         case 'press': await page.press(args.selector, args.key); value = await page.snapshot(); break;
         case 'scroll': await page.mouse.move(args.x ?? 500, args.y ?? 400); await page.mouse.wheel(0, args.deltaY, { label: 'scroll page content' }); value = await page.snapshot(); break;
-        case 'evaluate': value = await page.evaluate(args.expression); break;
         case 'shot': {
           value = { ...(await capturePage(task, page, args)), url: await page.url() }; break;
         }

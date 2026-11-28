@@ -5,6 +5,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { EgoWorld } from '../src/world.ts';
 import { CliBridge } from '../src/bridge.ts';
+import { smokeTools } from './smoke-tools.ts';
 import { EGO_DEFAULTS } from '../src/config.ts';
 import { nullLogger } from 'cortico/core/util.ts';
 import type { DeferredEventSpec, ToolOutcome, WorldHost } from 'cortico/core/types.ts';
@@ -38,18 +39,19 @@ const port = (server.address() as any).port;
 const cfg = structuredClone(EGO_DEFAULTS); cfg.enabled = true; cfg.spaceName = process.env.CORTICO_EGO_SMOKE_SPACE || `ego-video-window-${Date.now()}`;
 const bridge = new CliBridge({ cliFile: cfg.cliFile, dataDir: dir, timeoutMs: () => 45000 });
 const world = new EgoWorld({ cfg, dataDir: dir, botDir: dir, timezone: 'Asia/Shanghai', bridge });
+const fixtureBridge = new CliBridge({ cliFile: cfg.cliFile, dataDir: dir, timeoutMs: () => 15000,
+  runtimeUrl: new URL('./smoke-runtime.mjs', import.meta.url).href });
 const scenes: DeferredEventSpec[] = [];
 const host = { log: nullLogger(), pushEvent: async (e: any) => { steps.push({ event: e.type, text: e.text }); return e; }, pushDeferred: (e: DeferredEventSpec) => { scenes.push(e); } } as unknown as WorldHost;
+const smoke = smokeTools(world, host);
 async function call(name: string, args: Record<string, unknown>): Promise<ToolOutcome> {
-  const raw = await world.tools().find(t => t.name === `ego_${name}`)!.handler(args, { role: 'smoke', log: nullLogger() });
-  const value = typeof raw === 'string' ? { text: raw } : raw;
-  assert(!value.failed, `${name}: ${value.text}`);
+  const value = await smoke.call(name, args);
   steps.push({ tool: name, text: value.text.slice(0, 1500), blobs: value.blobs?.length ?? 0 });
   console.log(`PASS ${name}`); return value;
 }
 function data(result: ToolOutcome) { return JSON.parse(result.text.slice(result.text.indexOf('\n') + 1)); }
 try {
-  await world.start(host); assert(world.status().connected, JSON.stringify(world.status()));
+  await world.start(smoke.host); assert(world.status().connected, JSON.stringify(world.status()));
   const existing = data(await call('tabs', {}));
   for (const tab of existing) if (tab.page && tab.openedBy === 'agent' && /^http:\/\/(127\.0\.0\.1|localhost):\d+\//.test(tab.url)) await call('close', { page: tab.page });
   const opened = data(await call('open', { url: `http://127.0.0.1:${port}/` }));
@@ -61,10 +63,14 @@ try {
   assert(popup.pages.length >= 2); steps.push({ popupLabels: popup.pages.map((p: any) => p.page) });
   await call('shot', { page });
   await call('navigate', { page, url: `http://127.0.0.1:${port}/video` });
-  // Browser-side polling, not sleeps, waits for the synthetic recording and decoder.
-  const ready = await bridge.run('evaluate', { spaceId: world.status().spaceId, page,
-    expression: `(async()=>{const end=Date.now()+12000;while(Date.now()<end){if(window.fixtureReady&&document.querySelector('video').readyState>=2)return true;await new Promise(r=>setTimeout(r,100));}throw new Error('synthetic video not ready')})()` });
-  assert(!ready.error, ready.error); assert.equal(ready.value, true);
+  const readyDeadline = Date.now() + 12000;
+  let ready = false;
+  while (!ready && Date.now() < readyDeadline) {
+    const response = await fixtureBridge.run('fixture-video-ready', { spaceId: world.status().spaceId, page });
+    assert(!response.error, response.error); ready = response.value === true;
+    if (!ready) await new Promise(r => setTimeout(r, 100));
+  }
+  assert(ready, 'Synthetic video did not decode');
   const look = await call('video', { page, action: 'look' });
   assert.equal(data(look).capture, 'video-frame'); assert.match(look.text, /Ego 字幕验收成功/);
   assert(look.blobs?.length); await writeFile(join(dir, 'video-frame.jpg'), (look.blobs![0] as any).bytes);
@@ -80,7 +86,9 @@ try {
   assert.equal(sceneData.capture, 'video-mosaic'); assert.equal(sceneData.frameTimes.length, 4);
   assert(sceneData.frameTimes.at(-1) - sceneData.frameTimes[0] >= 10, 'Frames must span the current observation window');
   evidence.periodicScene = sceneData;
-  const playback = data(await call('evaluate', { page, expression: '({ paused: document.querySelector("video").paused, pauses: window.fixturePauses })' }));
+  const playbackProbe = await fixtureBridge.run('fixture-video-playback', { spaceId: world.status().spaceId, page });
+  assert(!playbackProbe.error, playbackProbe.error);
+  const playback = playbackProbe.value;
   assert.deepEqual(playback, { paused: false, pauses: 0 });
   evidence.smoothPlayback = playback;
   await writeFile(join(dir, 'video-mosaic.jpg'), (scene.blobs[0] as any).bytes);

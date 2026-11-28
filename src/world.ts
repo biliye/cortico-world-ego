@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import type { EventOrigin, ToolDef, ToolOutcome, World, WorldHost, WorldWebUiDecl } from 'cortico/core/types.ts';
+import type { EventOrigin, ToolCallContext, ToolDef, ToolOutcome, World, WorldHost, WorldWebUiDecl } from 'cortico/core/types.ts';
 import { mimeOfHandle } from 'cortico/core/blobs.ts';
 import { nowIso } from 'cortico/core/util.ts';
 import { CliBridge, type EgoBridge, type BridgeReceipt, type EvaluationTimeout } from './bridge.ts';
@@ -115,7 +115,7 @@ export class EgoWorld implements World {
   envPromptVars(): Record<string, string> { return { 'ego.spaceName': this.spaceName }; }
   tools(): ToolDef[] {
     return EGO_TOOL_DECLS.map(spec => {
-      if (spec.name === 'ego_search') return { ...spec, interruptible: true, handler: (args, ctx) => this.searchPublic(args, ctx.signal) };
+      if (spec.name === 'ego_search') return { ...spec, interruptible: true, handler: (args, ctx) => this.searchPublic(args, ctx) };
       if (spec.name === 'ego_wait') return { ...spec, handler: (args, ctx) => this.wait(args, ctx.signal) };
       return { ...spec, handler: (args, ctx) => this.serial(async () => {
         if (!this.running) return { text: 'Ego World is stopped.', failed: true };
@@ -123,7 +123,11 @@ export class EgoWorld implements World {
         if (this.saved.halted && !diagnostic) return { text: this.pausedToolMessage(), failed: true };
         if (!this.connected && !diagnostic) return { text: this.disconnectedToolMessage(), failed: true };
         ctx.signal?.throwIfAborted();
-        try { return await this.invokeTool(spec.name.slice(4), args, ctx.signal); }
+        try {
+          const outcome = await this.invokeTool(spec.name.slice(4), args, ctx.signal);
+          if (spec.name === 'ego_handoff' || (spec.name === 'ego_video' && args.action === 'tune')) return outcome;
+          return await this.externalOutcome(spec.name, outcome, ctx);
+        }
         catch (error) {
           if (error instanceof BrowserCommandError) {
             if (!error.reported) this.reportCommandError(error.message);
@@ -134,19 +138,42 @@ export class EgoWorld implements World {
       }) };
     });
   }
-  private async searchPublic(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome> {
+  private async searchPublic(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> {
     try {
       if (!this.running) throw new Error('Ego World is stopped.');
-      const combined = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
-      const result = await this.search.search(args, combined);
-      return { text: JSON.stringify(result), ...(result.status === 'unavailable' && { failed: true }) };
+      const combined = ctx.signal ? AbortSignal.any([ctx.signal, this.lifetime.signal]) : this.lifetime.signal;
+      const result = await this.search.search(validate('search', args), combined);
+      combined.throwIfAborted();
+      return await this.externalOutcome('ego_search', { text: JSON.stringify(result), ...(result.status === 'unavailable' && { failed: true }) }, ctx);
     } catch (error) {
       return { text: error instanceof Error ? error.message : String(error), failed: true };
+    }
+  }
+  private async externalOutcome(tool: string, outcome: ToolOutcome, ctx: ToolCallContext): Promise<ToolOutcome> {
+    const host = this.host;
+    if (!host) return { text: 'Ego result could not be delivered because the World is stopped.', failed: true };
+    const resultId = randomUUID();
+    const queue = typeof host.drainPendingEvents === 'function' ? ctx.queueExternalEvents : undefined;
+    try {
+      const event = await host.pushEvent({ type: 'ego.result', source: this.id, senderKey: this.id,
+        ts: nowIso(this.options.timezone), origin: 'external',
+        text: `${tool} result ${resultId}\n${outcome.text}`, blobs: outcome.blobs,
+        meta: { tool, resultId, callId: ctx.callId } }, { trigger: queue ? 'piggyback' : 'debounce' });
+      if (event.contextDelivery === 'archive-only') return { text: 'Ego result was archived. Enable Ego events to receive results.', failed: true };
+      if (queue) {
+        // Only move this result into the current tool round. Leave unrelated batches on the bus.
+        queue(await host.drainPendingEvents(pending => pending.cursor === event.cursor));
+      }
+      return { text: `See external event ego.result ${resultId} for ${tool}.`, ...(outcome.failed && { failed: true }) };
+    } catch (error) {
+      this.reportCommandError(`Could not deliver ${tool} result: ${String(error)}`);
+      return { text: 'Ego completed the command but could not deliver its result. Check the World panel before retrying.', failed: true };
     }
   }
   private async wait(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome> {
     try {
       if (!this.running) throw new Error('Ego World is stopped.');
+      args = validate('wait', args);
       if (typeof args.seconds !== 'number' || !Number.isFinite(args.seconds) || args.seconds < 0 || args.seconds > 60) throw new Error('seconds must be a finite number from 0 to 60.');
       const combined = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
       combined.throwIfAborted();
@@ -651,7 +678,8 @@ export class EgoWorld implements World {
       else this.playing.delete(key);
       this.schedulePlaybackKeepalive();
     }
-    if (!['inspect', 'look'].includes(action)) await this.event('video.state', JSON.stringify({ page: args.page, action, time: value.time, paused: value.paused }), 'internal');
+    if (!['inspect', 'look'].includes(action)) await this.event('video.state', JSON.stringify({ page: args.page, action,
+      time: Number.isFinite(value.time) ? value.time : undefined, paused: typeof value.paused === 'boolean' ? value.paused : undefined }), 'internal');
     if (action !== 'watch') {
       if (action === 'look') value.observation = { phase: 'snapshot', watching: this.watch?.page === args.page, danmaku: videoArgs.danmaku,
         note: 'look captures now; it does not wait to collect a time window. For several frames within 15 seconds, call watch once and wait for ego.video.scene. Repeated watch restarts sampling.' };

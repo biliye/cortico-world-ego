@@ -26,7 +26,6 @@ export const EGO: WorldDefinition<EgoConfigSection> = {
       ego_download: { zh: '从网页下载文件为附件，可用 save_blob 存进工作区。', en: 'Download a page file as an attachment that save_blob can keep in the workspace.' },
       ego_press: { zh: '向元素发送按键。', en: 'Send keys to an element.' },
       ego_scroll: { zh: '滚动网页。', en: 'Scroll a page.' },
-      ego_evaluate: { zh: '在网页中执行 JavaScript。', en: 'Evaluate JavaScript inside the page.' },
       ego_wait: { zh: '在宿主等待，不执行页面脚本或阻塞视频采样。', en: 'Wait in the host without page evaluation or blocking video sampling.' },
       ego_shot: { zh: '获取网页当前视口的图片附件。', en: 'Capture the page viewport as an attachment.' },
       ego_close: { zh: '关闭 bot 创建的页面。', en: 'Close an agent-created page.' },
@@ -36,6 +35,7 @@ export const EGO: WorldDefinition<EgoConfigSection> = {
       ego_search: { zh: '搜索网页或查询梗的含义与出处。', en: 'Search the web or find evidence for a meme’s meaning and origin.' },
     }),
     events: [
+      { type: 'ego.result', description: { zh: '浏览器或搜索工具返回的外部内容及附件。', en: 'External content and attachments from browser or search tools.' } },
       { type: 'ego.state', description: { zh: '连接、接管或恢复状态。', en: 'Connection, control handoff or resume state.' } },
       { type: 'ego.video.state', description: { zh: '视频播放与观看状态。', en: 'Playback and observation state.' } },
       { type: 'ego.video.scene', description: { zh: '显式观看期间每段时间的多帧拼图、可用字幕与弹幕文字。', en: 'Multi-frame interval mosaics, available subtitles and danmaku text during explicit watching.' } },

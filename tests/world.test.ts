@@ -9,7 +9,7 @@ import { SEARCH_SECRETS } from '../src/search-settings.ts';
 import { EGO } from '../src/definition.ts';
 import { MAX_FILE_BYTES } from '../src/file-transfer.mjs';
 import type { BridgeReceipt, EgoBridge } from '../src/bridge.ts';
-import type { DeferredEventSpec, EventEnvelope, WorldHost, ToolOutcome } from 'cortico/core/types.ts';
+import type { DeferredEventSpec, EventEnvelope, WorldHost, ToolCallContext, ToolOutcome } from 'cortico/core/types.ts';
 import { WakeBus } from 'cortico/core/bus.ts';
 import { nullLogger, Runlog } from 'cortico/core/util.ts';
 
@@ -33,26 +33,37 @@ class Browser implements EgoBridge {
 }
 let dir: string, world: EgoWorld, browser: Browser;
 let events: EventEnvelope[], deferred: DeferredEventSpec[];
+let resultBlobs: Map<string, ToolOutcome['blobs']>;
 let cfg: typeof EGO_DEFAULTS;
 let blobs: WorldHost['blob'];
 function host(bus?: WakeBus): WorldHost {
-  const pushEvent: WorldHost['pushEvent'] = async ({ blobs: _blobs, ...event }, opts) => {
+  const pushEvent: WorldHost['pushEvent'] = async ({ blobs: attachments, ...event }, opts) => {
     const deliver = opts?.deliver !== false;
     const envelope: EventEnvelope = { ...event, cursor: events.length + 1, origin: event.origin ?? 'external',
       contextDelivery: deliver ? 'deliver' : 'archive-only' };
     events.push(envelope);
+    if (event.type === 'ego.result' && typeof event.meta?.resultId === 'string') resultBlobs.set(event.meta.resultId, attachments);
     if (deliver) bus?.push({ event: envelope }, { trigger: opts?.trigger });
     return envelope;
   };
-  return { log: nullLogger(), blob: (handle: string) => blobs(handle), pushEvent, pushDeferred: (e: DeferredEventSpec) => { deferred.push(e); } } as unknown as WorldHost;
+  return { log: nullLogger(), blob: (handle: string) => blobs(handle), pushEvent,
+    drainPendingEvents: async (filter: (event: EventEnvelope) => boolean) => (bus?.drainPending(item => !!item.event && filter(item.event)) ?? []).map(item => item.event!),
+    pushDeferred: (e: DeferredEventSpec) => { deferred.push(e); } } as unknown as WorldHost;
+}
+async function rawCall(name: string, args: Record<string, unknown> = {}, context: Partial<ToolCallContext> = {}): Promise<ToolOutcome> {
+  const value = await world.tools().find(t => t.name === `ego_${name}`)!.handler(args, { role: 'test', log: nullLogger(), ...context });
+  return typeof value === 'string' ? { text: value } : value;
 }
 async function call(name: string, args: Record<string, unknown> = {}): Promise<ToolOutcome> {
-  const value = await world.tools().find(t => t.name === `ego_${name}`)!.handler(args, { role: 'test', log: nullLogger() });
-  return typeof value === 'string' ? { text: value } : value;
+  const outcome = await rawCall(name, args);
+  const resultId = /^See external event ego\.result ([\w-]+) for /.exec(outcome.text)?.[1];
+  if (!resultId) return outcome;
+  const event = events.find(e => e.meta?.resultId === resultId)!;
+  return { ...outcome, text: event.text.slice(event.text.indexOf('\n') + 1), blobs: resultBlobs.get(resultId) };
 }
 beforeEach(async () => {
   dir = await mkdtemp(join(process.cwd(), '.test-data-'));
-  events = []; deferred = []; browser = new Browser(); cfg = structuredClone(EGO_DEFAULTS);
+  events = []; deferred = []; resultBlobs = new Map(); browser = new Browser(); cfg = structuredClone(EGO_DEFAULTS);
   blobs = () => null;
   world = new EgoWorld({ cfg, dataDir: dir, botDir: dir, timezone: 'Asia/Shanghai', bridge: browser });
   await world.start(host());
@@ -87,8 +98,12 @@ it('saves search settings and keys while inactive and searches without taking br
   await call('handoff');
   expect(world.status().halted).toBe(true);
   const before = browser.calls.length;
-  const outcome = await call('search', { query: 'example' });
-  expect(JSON.parse(outcome.text)).toMatchObject({ status: 'available', source: 'Tavily' });
+  const outcome = await rawCall('search', { query: 'example' });
+  const event = events.at(-1)!;
+  expect(event).toMatchObject({ type: 'ego.result', origin: 'external', meta: { tool: 'ego_search' } });
+  expect(outcome.text).toContain(String(event.meta?.resultId));
+  expect(outcome.text).not.toContain('https://example.org/result');
+  expect(JSON.parse(event.text.slice(event.text.indexOf('\n') + 1))).toMatchObject({ status: 'available', source: 'Tavily' });
   expect(request).toHaveBeenCalledOnce();
   expect(browser.calls).toHaveLength(before);
 });
@@ -180,7 +195,8 @@ it.each(['target-unavailable', 'error', 'empty', 'available'])('exposes structur
   expect(result.text).toContain('"aid":170001');
   if (result.failed) {
     expect(result.text).not.toContain(diagnostic);
-    expect(events).toHaveLength(eventCount);
+    expect(events).toHaveLength(eventCount + 1);
+    expect(events.at(-1)).toMatchObject({ type: 'ego.result', origin: 'external' });
     expect(world.status().lastCommandError).toContain(diagnostic);
   }
   expect(browser.calls.at(-1)).toMatchObject({ op: 'bilibili', args: { aid: 170001 } });
@@ -332,13 +348,35 @@ describe('contract and tools', () => {
   it('matches self-description and declares all actually emitted events', () => {
     expect(world.tools().map(t => t.name)).toEqual(EGO.describe!.tools.map(t => t.name));
     expect(events[0]).toMatchObject({ type: 'ego.state', origin: 'internal' });
-    expect(EGO.describe!.events.map(e => e.type)).toEqual(['ego.state', 'ego.video.state', 'ego.video.scene']);
+    expect(EGO.describe!.events.map(e => e.type)).toEqual(['ego.result', 'ego.state', 'ego.video.state', 'ego.video.scene']);
+    expect(world.tools().map(t => t.name)).not.toContain('ego_evaluate');
     expect(EGO.defaults().enabled).toBe(false);
   });
   it('does not share nested config defaults', () => { const cfg1 = EGO.defaults(); cfg1.video.maxFrames = 9; expect(EGO.defaults().video.maxFrames).toBe(4); });
   it('pages long snapshots without losing the continuation position', async () => {
     const result = await call('read', { page: 'p1', offset: 2, maxChars: 100 });
     expect(result.text).toContain('offset=2 end=10 totalChars=10 truncated=false\ncdefghij');
+  });
+  it('delivers page content after the tool receipt without flushing an unrelated pending message', async () => {
+    vi.useFakeTimers();
+    const bus = new WakeBus({ quietGapMs: 1000, minBatchAgeMs: 1000, maxBatchAgeMs: 5000, maxBatchSize: 10 });
+    await world.stop();
+    const worldHost = host(bus);
+    await world.start(worldHost);
+    bus.takeIfReady();
+    const chat = await worldHost.pushEvent({ type: 'chat.message', source: 'chat', text: 'Waiting to batch.', ts: new Date().toISOString() });
+    const content = 'Untrusted fixture from the page';
+    browser.next = { spaceId: 1, value: content };
+    const queueExternalEvents = vi.fn();
+    const receipt = await rawCall('read', { page: 'p1' }, { queueExternalEvents, callId: 'call_read' });
+    const event = events.at(-1)!;
+    expect(event).toMatchObject({ type: 'ego.result', origin: 'external', text: expect.stringContaining(content), meta: { tool: 'ego_read', callId: 'call_read' } });
+    expect(receipt.text).toContain(String(event.meta?.resultId));
+    expect(receipt.text).not.toContain(content);
+    expect(queueExternalEvents.mock.calls).toEqual([[[event]]]);
+    expect(bus.takeIfReady()).toBeNull();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(bus.takeIfReady()).toEqual([{ event: chat }]);
   });
   it('forwards boolean fullPage values and rejects a string before reading the page', async () => {
     expect((await call('read', { page: 'p1', fullPage: false })).failed).toBeUndefined();
@@ -377,9 +415,9 @@ describe('contract and tools', () => {
 describe('control boundaries', () => {
   const evaluationTimeout = () => ({ code: 'EGO_PAGE_EVALUATION_TIMED_OUT', error: 'page.evaluate timed out after 15000ms; evaluation still pending', uncertain: true,
     evaluation: { page: 'p1', timeoutMs: 15000, executionStopped: false, pageResponsive: true, mayHaveLateEffects: true } });
-  it('allows tabs and paginated reads after a 20-second Promise timeout, including after eight seconds and restart', async () => {
+  it('allows tabs and paginated reads after a page-evaluation timeout, including after eight seconds and restart', async () => {
     vi.useFakeTimers(); browser.next = evaluationTimeout();
-    const result = await call('evaluate', { page: 'p1', expression: 'new Promise(r => setTimeout(r, 20000))' });
+    const result = await call('bilibili', { page: 'p1', action: 'related' });
     expect(result.failed).toBe(true); expect(result.text).toContain('EGO_PAGE_EVALUATION_TIMED_OUT');
     expect(result.text).not.toContain(evaluationTimeout().error);
     expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', text: expect.stringContaining('evaluation still pending') });
@@ -395,7 +433,7 @@ describe('control boundaries', () => {
     const blocked = await call('click', { page: 'p1', selector: '@1' });
     expect(blocked).toMatchObject({ failed: true, text: expect.stringContaining('EGO_PAGE_EVALUATION_TIMED_OUT') });
     expect(blocked.text).not.toContain(evaluationTimeout().error);
-    expect((await call('evaluate', { page: 'p1', expression: 'submit()' })).failed).toBe(true);
+    expect((await call('bilibili', { page: 'p1', action: 'related' })).failed).toBe(true);
     const count = browser.calls.length; await vi.advanceTimersByTimeAsync(60000); await (world as any).queue;
     expect(browser.calls.slice(count).every(c => c.op === 'control-status')).toBe(true); expect(world.status().halted).toBe(true);
     await world.stop(); await world.start(host());
@@ -406,7 +444,7 @@ describe('control boundaries', () => {
     await world.webUi().invoke!('control', 'resume', []); expect(world.status()).toMatchObject({ halted: false, evaluation: undefined });
   });
   it.each(['tabs', 'read'].flatMap(op => ['EGO_HELPER_UNAVAILABLE', 'EGO_TASK_SPACE_USER_IN_CONTROL', 'EGO_TASK_SPACE_NOT_FOUND', 'EGO_COMMAND_TIMEOUT', 'EGO_PAGE_EVALUATION_TIMED_OUT'].map(code => [op, code])))('keeps the original evaluation stop if %s returns %s', async (op: string, code: string) => {
-    browser.next = evaluationTimeout(); await call('evaluate', { page: 'p1', expression: 'pending()' });
+    browser.next = evaluationTimeout(); await call('bilibili', { page: 'p1', action: 'related' });
     const saved = await readFile(join(dir, 'ego', 'space.json'), 'utf8');
     browser.next = { error: code, code, uncertain: code === 'EGO_COMMAND_TIMEOUT' };
     expect((await call(op, { page: 'p1' })).failed).toBe(true);
@@ -418,11 +456,11 @@ describe('control boundaries', () => {
     await call('handoff'); let count = browser.calls.length;
     expect((await call(op, { page: 'p1' })).failed).toBe(true); expect(browser.calls).toHaveLength(count);
     await world.webUi().invoke!('control', 'resume', []); browser.next = { error: 'unknown late effects', uncertain: true };
-    await call('evaluate', { page: 'p1', expression: 'pending()' }); count = browser.calls.length;
+    await call('bilibili', { page: 'p1', action: 'related' }); count = browser.calls.length;
     expect((await call(op, { page: 'p1' })).failed).toBe(true); expect(browser.calls).toHaveLength(count);
   });
   it.each([{ spaceId: 2, value: 'wrong Space' }, { value: 'missing Space' }, { spaceId: 1, uncertain: true, value: 'uncertain' }])('rejects an invalid diagnostic read receipt: %j', async (receipt: BridgeReceipt) => {
-    browser.next = evaluationTimeout(); await call('evaluate', { page: 'p1', expression: 'pending()' });
+    browser.next = evaluationTimeout(); await call('bilibili', { page: 'p1', action: 'related' });
     const saved = await readFile(join(dir, 'ego', 'space.json'), 'utf8');
     browser.next = receipt;
     expect((await call('read', { page: 'p1' })).failed).toBe(true);
@@ -433,7 +471,7 @@ describe('control boundaries', () => {
   const healthyEvaluation = () => [agentControl(), { spaceId: 1, value: 'fresh snapshot' }, agentControl()];
   it('automatically recovers a responsive pending Promise after control, snapshot, and control checks without replay', async () => {
     vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });
-    browser.next = evaluationTimeout(); await call('evaluate', { page: 'p1', expression: 'new Promise(r => setTimeout(r, 20000))' });
+    browser.next = evaluationTimeout(); await call('bilibili', { page: 'p1', action: 'related' });
     const count = browser.calls.length; browser.replies = healthyEvaluation();
     await controlTick(1999); expect(browser.calls).toHaveLength(count); expect(world.status().halted).toBe(true);
     await controlTick(1);
@@ -454,7 +492,7 @@ describe('control boundaries', () => {
     expect(events.at(-1)?.text).toContain('outcome remains unknown');
   });
   it('retries offline and unresponsive diagnostics with backoff, then recovers without a panel action', async () => {
-    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('evaluate', { page: 'p1', expression: 'pending()' });
+    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('bilibili', { page: 'p1', action: 'related' });
     browser.next = { code: 'EGO_HELPER_UNAVAILABLE', error: 'offline' }; await controlTick(2000);
     expect(world.status()).toMatchObject({ halted: true, checkingControl: true });
     browser.replies = [agentControl(), { code: 'EGO_PAGE_EVALUATION_TIMED_OUT', error: 'still unresponsive', uncertain: true }];
@@ -464,7 +502,7 @@ describe('control boundaries', () => {
     await controlTick(1); expect(world.status().halted).toBe(false);
   });
   it.each(['before', 'during'])('does not recover or take control when the user takes over %s snapshot reading', async (when: string) => {
-    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('evaluate', { page: 'p1', expression: 'pending()' });
+    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('bilibili', { page: 'p1', action: 'related' });
     const user = { spaceId: 1, value: { control: 'user' } };
     const count = browser.calls.length;
     browser.replies = when === 'before' ? [user] : [agentControl(), { spaceId: 1, value: 'snapshot' }, user];
@@ -476,7 +514,7 @@ describe('control boundaries', () => {
     { spaceId: 2, value: 'wrong Space' }, { spaceId: 1, value: null }, { spaceId: 1, value: { snapshot: 'unexpected receipt' } },
     { spaceId: 1, uncertain: true, value: 'snapshot' }, { spaceId: 1, error: 'read failed' }, { value: 'missing Space id' },
   ])('keeps the original pause after an invalid background snapshot: %j', async (receipt: BridgeReceipt) => {
-    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('evaluate', { page: 'p1', expression: 'pending()' });
+    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('bilibili', { page: 'p1', action: 'related' });
     const saved = await readFile(join(dir, 'ego', 'space.json'), 'utf8'); const count = browser.calls.length;
     browser.replies = [agentControl(), receipt]; await controlTick(2000);
     expect(world.status()).toMatchObject({ halted: true, checkingControl: true }); expect(world.status().lastUnknownEvaluation).toBeUndefined();
@@ -484,7 +522,7 @@ describe('control boundaries', () => {
     expect(browser.calls.slice(count).map(c => c.op)).toEqual(['control-status', 'read']);
   });
   it.each(['EGO_TASK_SPACE_NOT_FOUND', 'EGO_TASK_SPACE_INACTIVE', 'EGO_TASK_HOST_DISCONNECTED'])('stops diagnosis on %s without recreating the Space or losing the original timeout', async (code: string) => {
-    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('evaluate', { page: 'p1', expression: 'pending()' });
+    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('bilibili', { page: 'p1', action: 'related' });
     browser.next = { code, error: 'Space unavailable' }; await controlTick(2000);
     expect(world.status()).toMatchObject({ halted: true, code: 'EGO_PAGE_EVALUATION_TIMED_OUT', evaluationRecoveryBlocked: code, checkingControl: false, autoRecovering: false });
     const count = browser.calls.length; await controlTick(60000); expect(browser.calls).toHaveLength(count);
@@ -492,7 +530,7 @@ describe('control boundaries', () => {
   });
   it('restores pending diagnosis after restart and uses the original page even without SDK metadata', async () => {
     vi.useFakeTimers(); browser.next = { code: 'EGO_PAGE_EVALUATION_TIMED_OUT', error: 'pending' };
-    await call('evaluate', { page: 'p2', expression: 'pending()' }); await world.stop(); await world.start(host());
+    await call('bilibili', { page: 'p2', action: 'related' }); await world.stop(); await world.start(host());
     browser.replies = healthyEvaluation(); await controlTick(2000);
     expect(browser.calls.at(-2)).toMatchObject({ op: 'read', args: { page: 'p2', spaceId: 1 } });
     expect(world.status()).toMatchObject({ halted: false, lastUnknownEvaluation: { page: 'p2' } });
@@ -505,7 +543,7 @@ describe('control boundaries', () => {
     expect((await call('read', { page: 'p1' })).failed).toBeUndefined();
   });
   it('does not unlock from a late diagnostic result after World stop', async () => {
-    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('evaluate', { page: 'p1', expression: 'pending()' });
+    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('bilibili', { page: 'p1', action: 'related' });
     let finish!: (receipt: BridgeReceipt) => void;
     const run = browser.run.bind(browser);
     browser.run = async (op, args) => op === 'read' ? new Promise(resolve => { finish = resolve; }) : run(op, args);
@@ -516,13 +554,13 @@ describe('control boundaries', () => {
     expect(browser.calls.at(-1)?.op).toBe('control-status'); expect(vi.getTimerCount()).toBe(0);
   });
   it('cancels evaluation diagnosis when the operator stops the helper', async () => {
-    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('evaluate', { page: 'p1', expression: 'pending()' });
+    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('bilibili', { page: 'p1', action: 'related' });
     vi.spyOn((world as any).helper, 'stop').mockResolvedValue(undefined);
     await world.webUi().invoke!('control', 'stop-helper', []); const count = browser.calls.length;
     await controlTick(60000); expect(browser.calls).toHaveLength(count); expect(world.status().halted).toBe(true);
   });
   it('does not unlock when a helper stop is requested during a diagnostic read', async () => {
-    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('evaluate', { page: 'p1', expression: 'pending()' });
+    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('bilibili', { page: 'p1', action: 'related' });
     let finish!: (receipt: BridgeReceipt) => void; const run = browser.run.bind(browser);
     browser.run = async (op, args) => op === 'read' ? new Promise(resolve => { finish = resolve; }) : run(op, args);
     browser.next = agentControl(); await vi.advanceTimersByTimeAsync(2000);
@@ -536,18 +574,18 @@ describe('control boundaries', () => {
     { spaceId: 2, value: { control: 'agent' } }, { spaceId: 1, value: {} },
     { spaceId: 1, uncertain: true, value: { control: 'agent' } },
   ].map(receipt => ({ phase, receipt }))))('rejects invalid $phase control evidence: $receipt', async ({ phase, receipt }) => {
-    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('evaluate', { page: 'p1', expression: 'pending()' });
+    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('bilibili', { page: 'p1', action: 'related' });
     const count = browser.calls.length;
     browser.replies = phase === 'before' ? [receipt] : [agentControl(), { spaceId: 1, value: 'snapshot' }, receipt];
     await controlTick(2000); expect(world.status()).toMatchObject({ halted: true, checkingControl: true });
     expect(browser.calls.slice(count).map(c => c.op)).toEqual(phase === 'before' ? ['control-status'] : ['control-status', 'read', 'control-status']);
   });
   it('can recover during ego_wait, but only from successful diagnosis', async () => {
-    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('evaluate', { page: 'p1', expression: 'pending()' });
+    vi.useFakeTimers(); browser.next = evaluationTimeout(); await call('bilibili', { page: 'p1', action: 'related' });
     browser.replies = healthyEvaluation(); const waiting = call('wait', { seconds: 8 });
     await controlTick(2000); expect(world.status().halted).toBe(false);
     await controlTick(6000); expect((await waiting).text).toContain('"halted":false');
-    expect(browser.calls.filter(c => c.op === 'evaluate')).toHaveLength(1);
+    expect(browser.calls.filter(c => c.op === 'bilibili')).toHaveLength(1);
   });
   it('synchronizes Ego return without a second panel click and never replays work or restarts watching', async () => {
     vi.useFakeTimers();
@@ -575,7 +613,7 @@ describe('control boundaries', () => {
     ['click', { page: 'p1', selector: '@1' }],
     ['fill', { page: 'p1', selector: '@1', text: 'x' }],
     ['press', { page: 'p1', selector: '@1', key: 'Enter' }],
-    ['evaluate', { page: 'p1', expression: 'document.title' }],
+    ['bilibili', { page: 'p1', action: 'related' }],
     ['video', { page: 'p1', action: 'inspect' }],
   ];
   it.each(uncertainOperations)('keeps uncertain %s timeouts stopped across restart', async (op, args) => {
@@ -1041,7 +1079,7 @@ describe('host-only waiting', () => {
   });
   it('never clears an evaluation pause just because a host wait elapsed', async () => {
     vi.useFakeTimers(); browser.next = { code: 'EGO_PAGE_EVALUATION_TIMED_OUT', error: 'still pending', uncertain: true };
-    await call('evaluate', { page: 'p1', expression: 'pending()' }); const count = browser.calls.length;
+    await call('bilibili', { page: 'p1', action: 'related' }); const count = browser.calls.length;
     const waiting = call('wait', { seconds: 20 }); await vi.advanceTimersByTimeAsync(20000); expect((await waiting).failed).toBeUndefined();
     expect(world.status().halted).toBe(true); expect(browser.calls.slice(count).every(c => c.op === 'control-status')).toBe(true);
   });

@@ -9,6 +9,7 @@ import { build } from 'esbuild';
 import { prepareHelperLauncher } from '../src/helper-launcher.ts';
 import { HelperBridge, AutoBridge, readEndpoint } from '../src/helper-bridge.ts';
 import { isElevated } from '../src/helper.ts';
+import { CliBridge } from '../src/bridge.ts';
 const dir = resolve('.test-data', 'helper-fix');
 const helperDir = join(dir, '普通权限助手');
 await mkdir(dir, { recursive: true });
@@ -27,6 +28,8 @@ const endpoint = await readEndpoint(helperDir);
 result.helperPid = endpoint.pid; result.helperElevated = false; steps.push('generated hidden launcher started a non-elevated helper');
 const elevatedMessage = 'ego lite closed the connection because ego-browser is running as administrator. Run ego-browser from a terminal that is not elevated.';
 const bridge = new AutoBridge({ run: async () => ({ error: elevatedMessage, uncertain: true }) }, helper, 'auto');
+const fixtureBridge = new CliBridge({ cliFile: 'ego-browser', dataDir: dir, timeoutMs: () => 15000,
+  runtimeUrl: new URL('./smoke-runtime.mjs', import.meta.url).href });
 const spaceName = 'ego-helper-ui-fix-20261021';
 let spaceId: number | undefined;
 const fixture = await build({ stdin: { resolveDir: process.cwd(), loader: 'ts', contents: `
@@ -60,6 +63,11 @@ async function run(operation: string, args: Record<string, unknown>) {
   const receipt = await bridge.run(operation, { ...args, spaceId, spaceName, restoreMinimized: true });
   assert(!receipt.error, `${operation}: ${receipt.error}`); spaceId = receipt.spaceId ?? spaceId; return receipt.value;
 }
+async function inspectFixture(page: string) {
+  const receipt = await fixtureBridge.run('fixture-panel', { spaceId, page });
+  assert(!receipt.error, receipt.error);
+  return receipt.value;
+}
 let passed = false;
 try {
   const connectedSpace = await run('connect', {}); result.spaceId = spaceId; assert.equal(bridge.selected, 'helper'); console.log(`Ego test Space ${spaceId}`);
@@ -70,16 +78,16 @@ try {
   await run('click', { page, selector: '#save' });
   assert.match(await run('read', { page }), /普通权限助手-中文验收/); steps.push('helper executed real Ego open/fill/click/read');
   await run('navigate', { page, url: origin });
-  const state = await run('evaluate', { page, expression: `({ready:window.fixtureReady,title:document.querySelector('[role=status]')?.textContent,buttons:[...document.querySelectorAll('button')].filter(b=>!b.closest('details:not([open])')).map(b=>b.textContent),rawVisible:[...document.querySelectorAll('pre')].some(e=>!e.closest('details:not([open])'))})` });
+  const state = await inspectFixture(page);
   assert(state.ready); assert.equal(state.title, '需要启动普通权限助手'); assert(!state.rawVisible); assert(!state.buttons.includes('交还 bot')); assert(!state.buttons.includes('暂停视频观看'));
   await run('click', { page, selector: "loc=role:button[name='生成启动脚本']" });
   const shot = await run('shot', { page }); await writeFile(join(dir, 'setup-panel.png'), Buffer.from(shot.image.base64, 'base64'));
   await run('click', { page, selector: "loc=role:button[name='连接浏览器']" });
-  const connected = await run('evaluate', { page, expression: `({title:document.querySelector('[role=status]').textContent,buttons:[...document.querySelectorAll('button')].filter(b=>b.offsetParent!==null).map(b=>b.textContent),unstyled:[...document.querySelectorAll('button')].some(b=>!b.classList.contains('btn')),overflow:document.documentElement.scrollWidth>innerWidth})` });
+  const connected = await inspectFixture(page);
   assert.equal(connected.title, '浏览器已连接'); assert(!connected.unstyled); assert(!connected.overflow); assert(!connected.buttons.includes('连接浏览器')); assert(connected.buttons.includes('我要操作浏览器'));
   const online = await run('shot', { page }); await writeFile(join(dir, 'connected-panel.png'), Buffer.from(online.image.base64, 'base64'));
   await run('click', { page, selector: "loc=role:button[name='我要操作浏览器']" });
-  const paused = await run('evaluate', { page, expression: `({title:document.querySelector('[role=status]').textContent,buttons:[...document.querySelectorAll('button')].filter(b=>b.offsetParent!==null).map(b=>b.textContent)})` });
+  const paused = await inspectFixture(page);
   assert.equal(paused.title, '浏览器由你操作'); assert(paused.buttons.includes('交还 bot')); assert(!paused.buttons.includes('连接浏览器'));
   await run('click', { page, selector: "loc=role:button[name='交还 bot']" });
   steps.push('styled panel: helper setup, connect, correct visible controls, handoff and resume');

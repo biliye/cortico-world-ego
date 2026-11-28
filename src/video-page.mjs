@@ -74,12 +74,28 @@ export async function videoOperation(args) {
         result.frameTimes = cache.frames.map(f => f.time); result.frameCount = cache.frames.length;
         result.capture = 'video-sample';
         if (action === 'sample') return result;
-        const cols = Math.min(3, cache.frames.length), rows = Math.ceil(cache.frames.length / cols);
-        const grid = document.createElement('canvas'); grid.width = cols * width; grid.height = rows * (height + 26);
+        const frameCount = cache.frames.length;
+        const tileHeight = height + 26;
+        // Five and seven frames need one empty cell to avoid a single long strip.
+        const allowStrip = frameCount !== 5 && frameCount !== 7;
+        const firstColumnCount = allowStrip ? 1 : 2;
+        const lastColumnCount = allowStrip ? frameCount : frameCount - 1;
+        let cols = firstColumnCount;
+        let rows = Math.ceil(frameCount / cols);
+        for (let candidateCols = cols + 1; candidateCols <= lastColumnCount; candidateCols++) {
+          const candidateRows = Math.ceil(frameCount / candidateCols);
+          const slots = candidateCols * candidateRows;
+          const longestEdge = Math.max(candidateCols * width, candidateRows * tileHeight);
+          if (slots < cols * rows || (slots === cols * rows && longestEdge < Math.max(cols * width, rows * tileHeight))) {
+            cols = candidateCols;
+            rows = candidateRows;
+          }
+        }
+        const grid = document.createElement('canvas'); grid.width = cols * width; grid.height = rows * tileHeight;
         const g = grid.getContext('2d'); g.fillStyle = '#111'; g.fillRect(0, 0, grid.width, grid.height);
         for (let i = 0; i < cache.frames.length; i++) {
           const f = cache.frames[i], image = new Image(); image.src = f.jpeg; await image.decode();
-          const x = (i % cols) * width, y = Math.floor(i / cols) * (height + 26);
+          const x = (i % cols) * width, y = Math.floor(i / cols) * tileHeight;
           g.drawImage(image, x, y, width, height); g.fillStyle = '#fff'; g.font = '18px sans-serif'; g.fillText(`${f.time.toFixed(2)} s`, x + 8, y + height + 20);
         }
         result.image = { base64: grid.toDataURL('image/jpeg', 0.75).split(',')[1], mime: 'image/jpeg' };

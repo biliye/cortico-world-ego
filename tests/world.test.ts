@@ -956,6 +956,7 @@ describe('video observation lifetime', () => {
     expect(peek.text).toContain('"capture":"video-frame"'); expect(peek.text).toContain('"phase":"snapshot"'); expect(peek.text).toContain('does not wait');
     const start = await call('video', { page: 'p1', action: 'watch' });
     expect(start.text).toContain('"phase":"collecting"'); expect(start.text).toContain('"nextEvent":"ego.video.scene"');
+    expect(start.text).toContain('Read frameTimes in row order');
     expect(start.blobs).toBeUndefined(); expect(start.text).not.toContain('"frameCount"'); expect(deferred).toHaveLength(0);
   });
   it('flushes a short final scene before 15 seconds, stops watching and leaves the scene deliverable', async () => {
@@ -998,7 +999,19 @@ describe('video observation lifetime', () => {
     expect(browser.calls.slice(start).map(c => c.args.action)).toEqual(['sample', 'sample', 'look']);
     expect(browser.calls.at(-1)?.args.consumeFrames).toBe(true);
     expect(deferred).toHaveLength(1);
-    const scene = await deferred[0].render(); expect(scene && typeof scene !== 'string' && scene.blobs).toHaveLength(1);
+    const scene = await deferred[0].render();
+    if (!scene || typeof scene === 'string') throw new Error('Missing scene');
+    expect(scene.blobs).toHaveLength(1);
+    const [, header, body] = scene.text.split('\n');
+    expect(header).toContain('truncated=false');
+    expect(header).not.toContain('frameTimes=');
+    expect((scene.blobs![0] as any).fallbackText).not.toContain('frameTimes=');
+    const receipt = JSON.parse(body);
+    expect(receipt).toMatchObject({ frameTimes: expect.any(Array), observation: { phase: 'scene', windowSec: 15 } });
+    expect(receipt).not.toHaveProperty('source');
+    expect(receipt.observation).not.toHaveProperty('intervalMs');
+    expect(receipt.observation).not.toHaveProperty('note');
+    expect((await call('video', { page: 'p1', action: 'inspect' })).text).toContain('"source":"video1"');
   });
   it('with one frame configured captures only at the delivery interval', async () => {
     cfg.video.maxFrames = 1; vi.useFakeTimers(); await call('video', { page: 'p1', action: 'watch' });

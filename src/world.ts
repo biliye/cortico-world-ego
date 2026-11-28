@@ -126,7 +126,7 @@ export class EgoWorld implements World {
         try { return await this.invokeTool(spec.name.slice(4), args, ctx.signal); }
         catch (error) {
           if (error instanceof BrowserCommandError) {
-            if (!error.reported) await this.reportCommandError(error.message);
+            if (!error.reported) this.reportCommandError(error.message);
             return { text: error.toolText, failed: true };
           }
           return { text: error instanceof Error ? error.message : String(error), failed: true };
@@ -609,7 +609,7 @@ export class EgoWorld implements World {
       }
       if (operation === 'bilibili' && args.action === 'comments' && ['target-unavailable', 'error'].includes(value?.status)) {
         const { reason, error, ...details } = value;
-        await this.reportCommandError(`Bilibili comments: ${String(error ?? reason ?? value.status)}`);
+        this.reportCommandError(`Bilibili comments: ${String(error ?? reason ?? value.status)}`);
         const hint = value.status === 'target-unavailable' ? { reason: 'Check the video or provide a matching aid or bvid.' }
           : { error: 'Check the Bilibili tab and the World panel before retrying.' };
         return { ...this.outcome({ ...details, ...hint }), failed: true };
@@ -928,11 +928,9 @@ export class EgoWorld implements World {
   private async event(type: string, text: string, origin: EventOrigin): Promise<void> {
     await this.host?.pushEvent({ type: `ego.${type}`, source: this.id, senderKey: this.id, ts: nowIso(this.options.timezone), text, origin }, { trigger: 'flush' });
   }
-  private async reportCommandError(diagnostic: string): Promise<void> {
+  private reportCommandError(diagnostic: string): void {
     this.lastCommandError = diagnostic;
-    // Keep the raw diagnostic out of the event body if Core replays the archive after a restart.
-    await this.host?.pushEvent({ type: 'ego.state', source: this.id, senderKey: this.id, ts: nowIso(this.options.timezone),
-      text: 'Ego command failed. See the World panel for diagnostics.', origin: 'external', meta: { diagnostic } }, { deliver: false });
+    this.host?.log.info('Ego command failed.', { diagnostic });
   }
 }
 export function normalizeUrl(input: string): string {

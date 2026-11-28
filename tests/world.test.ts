@@ -11,7 +11,7 @@ import { MAX_FILE_BYTES } from '../src/file-transfer.mjs';
 import type { BridgeReceipt, EgoBridge } from '../src/bridge.ts';
 import type { DeferredEventSpec, EventEnvelope, WorldHost, ToolOutcome } from 'cortico/core/types.ts';
 import { WakeBus } from 'cortico/core/bus.ts';
-import { nullLogger } from 'cortico/core/util.ts';
+import { nullLogger, Runlog } from 'cortico/core/util.ts';
 
 class Browser implements EgoBridge {
   calls: Array<{ op: string; args: Record<string, unknown> }> = [];
@@ -173,14 +173,14 @@ it.each(['target-unavailable', 'error', 'empty', 'available'])('exposes structur
   const value = { status, video: { aid: 170001, bvid: 'BV17x411w7KC', title: '视频' }, comments: [],
     ...(status === 'error' && { error: diagnostic }), ...(status === 'target-unavailable' && { reason: diagnostic }) };
   browser.next = { spaceId: 1, value };
+  const eventCount = events.length;
   const result = await call('bilibili', { page: 'p1', action: 'comments', aid: 170001 });
   expect(result.failed === true).toBe(['target-unavailable', 'error'].includes(status));
   expect(result.text).toContain(`"status":"${status}"`);
   expect(result.text).toContain('"aid":170001');
   if (result.failed) {
     expect(result.text).not.toContain(diagnostic);
-    expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', contextDelivery: 'archive-only',
-      meta: { diagnostic: expect.stringContaining(diagnostic) } });
+    expect(events).toHaveLength(eventCount);
     expect(world.status().lastCommandError).toContain(diagnostic);
   }
   expect(browser.calls.at(-1)).toMatchObject({ op: 'bilibili', args: { aid: 170001 } });
@@ -841,13 +841,13 @@ describe('control boundaries', () => {
   });
   it('does not mistake an ordinary navigation error for a disconnected browser', async () => {
     const error = 'page=p2: net::ERR_NAME_NOT_RESOLVED';
+    const eventCount = events.length;
     browser.next = { pageLabel: 'p2', error, code: 'EGO_OPERATION_FAILED' };
     const result = await call('open', { url: 'unreachable.example' });
     expect(result.text).toContain('page=p2'); expect(result.failed).toBe(true);
     expect(result.text).toContain('EGO_OPERATION_FAILED');
     expect(result.text).not.toContain('net::ERR_NAME_NOT_RESOLVED');
-    expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', contextDelivery: 'archive-only',
-      meta: { diagnostic: expect.stringContaining(error) } });
+    expect(events).toHaveLength(eventCount);
     expect(world.status().lastCommandError).toContain(error);
     expect((await call('tabs')).failed).toBeUndefined();
   });
@@ -858,14 +858,15 @@ describe('control boundaries', () => {
     expect(result).toMatchObject({ failed: true, text: expect.stringContaining('EGO_OPERATION_FAILED') });
     expect(result.text).not.toContain(code);
     expect(result.text).not.toContain('Original browser diagnostic');
-    expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', contextDelivery: 'archive-only',
-      meta: { diagnostic: expect.stringContaining(code) } });
+    expect(world.status().lastCommandError).toContain(code);
   });
-  it('archives ordinary failures without waking or flushing the bus and still delivers control loss immediately', async () => {
+  it('logs ordinary failures without storing any event for replay or disturbing the bus', async () => {
     vi.useFakeTimers();
     const bus = new WakeBus({ quietGapMs: 1000, minBatchAgeMs: 1000, maxBatchAgeMs: 5000, maxBatchSize: 10 });
     await world.stop();
-    const worldHost = host(bus);
+    const logFile = join(dir, 'diagnostics.jsonl');
+    const runlog = new Runlog(logFile, { stdout: false });
+    const worldHost = { ...host(bus), log: runlog.logger('worlds.ego') };
     await world.start(worldHost);
     expect(bus.takeIfReady()).toHaveLength(1);
 
@@ -874,20 +875,26 @@ describe('control boundaries', () => {
       browser.next = { error: diagnostic, code: 'EGO_OPERATION_FAILED' };
       expect(await call('click', { page: 'p1', selector: '@1' })).toMatchObject({ failed: true });
     };
+    const eventCount = events.length;
     await expireRef();
     expect(bus.takeIfReady()).toBeNull();
     expect(bus.pending()).toBe(0);
-    expect(events.at(-1)).toMatchObject({ origin: 'external', contextDelivery: 'archive-only', meta: { diagnostic: expect.stringContaining(diagnostic) } });
-    expect(events.at(-1)?.text).not.toContain(diagnostic);
+    expect(events).toHaveLength(eventCount);
     expect(world.status().lastCommandError).toContain(diagnostic);
 
     const message = await worldHost.pushEvent({ type: 'chat.message', source: 'chat', ts: new Date().toISOString(), text: 'Wait for the batch.' });
     await vi.advanceTimersByTimeAsync(500);
     await expireRef();
+    expect(events).toHaveLength(eventCount + 1);
+    expect(events.at(-1)).toBe(message);
     expect(bus.takeIfReady()).toBeNull();
     expect(bus.pending()).toBe(1);
     await vi.advanceTimersByTimeAsync(500);
     expect(bus.takeIfReady()).toEqual([{ event: message }]);
+    const diagnostics = (await readFile(logFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics).toMatchObject(Array.from({ length: 2 }, () => ({ area: 'worlds.ego',
+      data: { diagnostic: expect.stringContaining(diagnostic) } })));
 
     browser.next = { error: 'Operator took control', code: 'EGO_TASK_SPACE_USER_IN_CONTROL' };
     expect(await call('tabs')).toMatchObject({ failed: true });

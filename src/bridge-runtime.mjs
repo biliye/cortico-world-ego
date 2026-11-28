@@ -77,7 +77,7 @@ export async function execute({ operation, args }) {
       } catch (error) {
         const code = errorCode(error);
         if (code?.startsWith('EGO_TASK_') || error?.mayHaveLateEffects) throw error;
-        return { spaceId: task.spaceId, error: `page=${page.label}: ${error?.message ?? String(error)}`, code: code ?? 'EGO_OPERATION_FAILED' };
+        return { spaceId: task.spaceId, pageLabel: page.label, error: `page=${page.label}: ${error?.message ?? String(error)}`, code: code ?? 'EGO_OPERATION_FAILED' };
       }
     } else {
       const tabs = await task.tabs();
@@ -85,7 +85,7 @@ export async function execute({ operation, args }) {
       if (!entry) throw new Error(`Unknown managed page ${args.page}. Use ego_tabs for current page labels.`);
       const page = task.page(args.page);
       switch (operation) {
-        case 'read': value = await page.snapshot({ scope: args.fullPage ? 'full_page' : 'only_within_viewport' }); break;
+        case 'read': value = await page.snapshot({ scope: args.fullPage === true ? 'full_page' : 'only_within_viewport' }); break;
         case 'navigate': await page.goto(args.url, { timeout: 30000 }); value = await page.snapshot(); break;
         case 'click': {
           const receipt = await page.click(args.selector, { label: 'operate page element' });

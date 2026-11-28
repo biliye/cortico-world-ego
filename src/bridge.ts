@@ -10,6 +10,7 @@ export interface EvaluationTimeout {
 }
 export interface BridgeReceipt {
   spaceId?: number;
+  pageLabel?: string;
   value?: any;
   error?: string;
   code?: string;

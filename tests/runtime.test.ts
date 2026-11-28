@@ -340,6 +340,13 @@ it('can read the same managed page after evaluation times out without replaying 
   expect(page.snapshot).toHaveBeenCalledWith({ scope: 'full_page' });
   expect(takeover).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled();
 });
+it.each([[undefined, 'only_within_viewport'], [false, 'only_within_viewport'], ['false', 'only_within_viewport'], [true, 'full_page']])(
+  'reads with scope %j → %s', async (fullPage, scope) => {
+    page.snapshot = vi.fn(async () => 'page snapshot');
+    expect(await execute({ operation: 'read', args: { page: 'p1', fullPage } })).toMatchObject({ value: 'page snapshot' });
+    expect(page.snapshot.mock.calls).toEqual([[{ scope }]]);
+  },
+);
 it('still returns danmaku when the subtitle API fails and obeys the danmaku switch', async () => {
   page.url = async () => 'https://www.bilibili.com/video/BVfixture';
   const evaluate = vi.fn(async (fn: unknown) => {

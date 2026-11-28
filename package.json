@@ -14,7 +14,7 @@
   "main": "./src/index.ts",
   "cortico": {
     "kind": "world", "api": 6, "displayName": "Ego 浏览器", "icon": "assets/icon.webp",
-    "tags": ["internet", "browser", "video", "external-setup", "high-cost"],
+    "tags": ["internet", "browser", "video", "external-setup", "high-cost", "unsafe", "injection-risk"],
     "locales": { "en": { "displayName": "Ego Browser", "description": "Ego Browser helps your little fat fish (小肥鱼) browse, search the web and look up memes, transfer files, take screenshots, and watch HTML5 or Bilibili video with frames, subtitles and danmaku. For Cortico and Coopanion. Requires Ego Lite." } },
     "describe": "describe.json", "webUiClient": "dist/webui.js"
   },

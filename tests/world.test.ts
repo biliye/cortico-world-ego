@@ -160,12 +160,19 @@ it('keeps the World available after a download start timeout with a successful s
 });
 
 it.each(['target-unavailable', 'error', 'empty', 'available'])('exposes structured comments status %s and marks only failures', async status => {
-  browser.next = { spaceId: 1, value: { status, video: { aid: 170001, bvid: 'BV17x411w7KC', title: '视频' }, comments: [], error: status === 'error' ? 'Bilibili HTTP 403' : undefined } };
+  const diagnostic = 'Original Bilibili diagnostic';
+  const value = { status, video: { aid: 170001, bvid: 'BV17x411w7KC', title: '视频' }, comments: [],
+    ...(status === 'error' && { error: diagnostic }), ...(status === 'target-unavailable' && { reason: diagnostic }) };
+  browser.next = { spaceId: 1, value };
   const result = await call('bilibili', { page: 'p1', action: 'comments', aid: 170001 });
   expect(result.failed === true).toBe(['target-unavailable', 'error'].includes(status));
   expect(result.text).toContain(`"status":"${status}"`);
   expect(result.text).toContain('"aid":170001');
-  if (status === 'error') expect(result.text).toContain('Bilibili HTTP 403');
+  if (result.failed) {
+    expect(result.text).not.toContain(diagnostic);
+    expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', text: expect.stringContaining(diagnostic) });
+    expect(world.status().lastCommandError).toContain(diagnostic);
+  }
   expect(browser.calls.at(-1)).toMatchObject({ op: 'bilibili', args: { aid: 170001 } });
 });
 
@@ -323,6 +330,15 @@ describe('contract and tools', () => {
     const result = await call('read', { page: 'p1', offset: 2, maxChars: 100 });
     expect(result.text).toContain('offset=2 end=10 totalChars=10 truncated=false\ncdefghij');
   });
+  it('forwards boolean fullPage values and rejects a string before reading the page', async () => {
+    expect((await call('read', { page: 'p1', fullPage: false })).failed).toBeUndefined();
+    expect(browser.calls.at(-1)).toMatchObject({ op: 'read', args: { fullPage: false } });
+    expect((await call('read', { page: 'p1', fullPage: true })).failed).toBeUndefined();
+    expect(browser.calls.at(-1)).toMatchObject({ op: 'read', args: { fullPage: true } });
+    const count = browser.calls.length;
+    expect(await call('read', { page: 'p1', fullPage: 'false' })).toEqual({ failed: true, text: 'fullPage must be a boolean.' });
+    expect(browser.calls).toHaveLength(count);
+  });
   it('rejects undeclared tool parameters before forwarding them to the bridge', async () => {
     const count = browser.calls.length;
     expect(await call('tabs', { playback: [] })).toMatchObject({ failed: true, text: 'Unknown parameter: playback' });
@@ -355,6 +371,7 @@ describe('control boundaries', () => {
     vi.useFakeTimers(); browser.next = evaluationTimeout();
     const result = await call('evaluate', { page: 'p1', expression: 'new Promise(r => setTimeout(r, 20000))' });
     expect(result.failed).toBe(true); expect(result.text).toContain('EGO_PAGE_EVALUATION_TIMED_OUT');
+    expect(result.text).not.toContain(evaluationTimeout().error);
     expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', text: expect.stringContaining('evaluation still pending') });
     const beforeTabs = browser.calls.length, tabs = await call('tabs');
     expect(tabs.failed).toBeUndefined(); expect(tabs.text).toContain('Read-only diagnosis only'); expect(browser.calls).toHaveLength(beforeTabs + 1);
@@ -365,7 +382,9 @@ describe('control boundaries', () => {
     await vi.advanceTimersByTimeAsync(8000);
     expect((await call('read', { page: 'p1' })).failed).toBeUndefined();
     expect(world.status()).toMatchObject({ halted: true, uncertain: true, checkingControl: true, evaluation: { executionStopped: false, pageResponsive: true } });
-    expect((await call('click', { page: 'p1', selector: '@1' })).failed).toBe(true);
+    const blocked = await call('click', { page: 'p1', selector: '@1' });
+    expect(blocked).toMatchObject({ failed: true, text: expect.stringContaining('EGO_PAGE_EVALUATION_TIMED_OUT') });
+    expect(blocked.text).not.toContain(evaluationTimeout().error);
     expect((await call('evaluate', { page: 'p1', expression: 'submit()' })).failed).toBe(true);
     const count = browser.calls.length; await vi.advanceTimersByTimeAsync(60000); await (world as any).queue;
     expect(browser.calls.slice(count).every(c => c.op === 'control-status')).toBe(true); expect(world.status().halted).toBe(true);
@@ -770,6 +789,10 @@ describe('control boundaries', () => {
     browser.next = { code: 'EGO_APP_NOT_FOUND', error, uncertain: false };
     await world.start(host());
     expect(world.status()).toMatchObject({ halted: false, connected: false, code: 'EGO_APP_NOT_FOUND' });
+    const offline = await call('tabs');
+    expect(offline).toMatchObject({ failed: true, text: expect.stringContaining('EGO_APP_NOT_FOUND') });
+    expect(offline.text).not.toContain(error);
+    expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', text: expect.stringContaining(error) });
     await world.webUi().invoke!('control', 'connect', []);
     browser.next = { error: `page=p1: ${error}`, uncertain: true };
     expect((await call('tabs')).failed).toBe(true);
@@ -807,10 +830,24 @@ describe('control boundaries', () => {
     expect(world.status().watching).toBe(null);
   });
   it('does not mistake an ordinary navigation error for a disconnected browser', async () => {
-    browser.next = { error: 'page=p2: net::ERR_NAME_NOT_RESOLVED' };
+    const error = 'page=p2: net::ERR_NAME_NOT_RESOLVED';
+    browser.next = { pageLabel: 'p2', error, code: 'EGO_OPERATION_FAILED' };
     const result = await call('open', { url: 'unreachable.example' });
     expect(result.text).toContain('page=p2'); expect(result.failed).toBe(true);
+    expect(result.text).toContain('EGO_OPERATION_FAILED');
+    expect(result.text).not.toContain('net::ERR_NAME_NOT_RESOLVED');
+    expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', text: expect.stringContaining(error) });
+    expect(world.status().lastCommandError).toContain(error);
     expect((await call('tabs')).failed).toBeUndefined();
+  });
+  it('uses a fixed code when the bridge returns an unknown error code', async () => {
+    const code = 'UNRECOGNIZED_BROWSER_ERROR';
+    browser.next = { error: 'Original browser diagnostic', code };
+    const result = await call('read', { page: 'p1' });
+    expect(result).toMatchObject({ failed: true, text: expect.stringContaining('EGO_OPERATION_FAILED') });
+    expect(result.text).not.toContain(code);
+    expect(result.text).not.toContain('Original browser diagnostic');
+    expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', text: expect.stringContaining(code) });
   });
 });
 

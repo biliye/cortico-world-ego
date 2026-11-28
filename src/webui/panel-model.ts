@@ -2,7 +2,7 @@ import type { EvaluationTimeout } from '../bridge.ts';
 import type { samplingSummary } from '../sampling.ts';
 type SamplingSummary = ReturnType<typeof samplingSummary>;
 export interface EgoPanelStatus {
-  running: boolean; connected: boolean; halted: boolean; reason: string; code?: string;
+  running: boolean; connected: boolean; halted: boolean; reason: string; code?: string; lastCommandError?: string;
   spaceId?: number; spaceName: string; watching: string | null; spaceMissing?: boolean; autoRecovering?: boolean; checkingControl?: boolean;
   evaluation?: EvaluationTimeout; evaluationRecoveryBlocked?: string; lastUnknownEvaluation?: EvaluationTimeout;
   sampling?: { batch: number; current: SamplingSummary; pending: SamplingSummary | null } | null;

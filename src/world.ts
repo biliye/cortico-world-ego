@@ -9,7 +9,7 @@ import { nowIso } from 'cortico/core/util.ts';
 import { CliBridge, type EgoBridge, type BridgeReceipt, type EvaluationTimeout } from './bridge.ts';
 import { bounded, egoConfigGroup, type EgoConfigSection } from './config.ts';
 import { EGO_TOOL_DECLS } from './tools.ts';
-import { AutoBridge, HelperBridge } from './helper-bridge.ts';
+import { AutoBridge, HelperBridge, type HelperStatus } from './helper-bridge.ts';
 import { prepareHelperLauncher } from './helper-launcher.ts';
 import { isConnectionFailure, normalizeFailure, normalizeSavedFailure } from './failures.ts';
 import { MAX_FILE_BYTES, safeFilename } from './file-transfer.mjs';
@@ -18,6 +18,7 @@ import { EgoSearch } from './search.ts';
 import type { SearchRequest } from './search-http.ts';
 import { SEARCH_SECRETS, isWebSearchProvider, validateSearchSettings, type SearchSettings } from './search-settings.ts';
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
+const RESULT_SESSION_REQUIRED = 'This session cannot receive Ego result events. Use this tool in the main session.';
 const UPLOAD_RETENTION_MS = 24 * 60 * 60 * 1000;
 const DOWNLOAD_EXTENSIONS: Readonly<Record<string, string>> = {
   'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif', 'image/webp': '.webp',
@@ -74,7 +75,7 @@ export class EgoWorld implements World {
   private readonly helper: HelperBridge;
   private readonly helperDir: string;
   private readonly transport?: AutoBridge;
-  private helperOnline = false;
+  private helperStatus: HelperStatus = 'offline';
   private launcherFile = '';
   private saved: SavedState = { halted: false, reason: '' };
   private lastCommandError?: string;
@@ -119,14 +120,15 @@ export class EgoWorld implements World {
       if (spec.name === 'ego_wait') return { ...spec, handler: (args, ctx) => this.wait(args, ctx.signal) };
       return { ...spec, handler: (args, ctx) => this.serial(async () => {
         if (!this.running) return { text: 'Ego World is stopped.', failed: true };
+        const hasExternalResult = spec.name !== 'ego_handoff' && !(spec.name === 'ego_video' && args.action === 'tune');
+        if (hasExternalResult && !this.canDeliverResult(ctx)) return { text: RESULT_SESSION_REQUIRED, failed: true };
         const diagnostic = this.isEvaluationDiagnostic(spec.name.slice(4));
         if (this.saved.halted && !diagnostic) return { text: this.pausedToolMessage(), failed: true };
         if (!this.connected && !diagnostic) return { text: this.disconnectedToolMessage(), failed: true };
         ctx.signal?.throwIfAborted();
         try {
           const outcome = await this.invokeTool(spec.name.slice(4), args, ctx.signal);
-          if (spec.name === 'ego_handoff' || (spec.name === 'ego_video' && args.action === 'tune')) return outcome;
-          return await this.externalOutcome(spec.name, outcome, ctx);
+          return hasExternalResult ? await this.externalOutcome(spec.name, outcome, ctx) : outcome;
         }
         catch (error) {
           if (error instanceof BrowserCommandError) {
@@ -141,6 +143,7 @@ export class EgoWorld implements World {
   private async searchPublic(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> {
     try {
       if (!this.running) throw new Error('Ego World is stopped.');
+      if (!this.canDeliverResult(ctx)) return { text: RESULT_SESSION_REQUIRED, failed: true };
       const combined = ctx.signal ? AbortSignal.any([ctx.signal, this.lifetime.signal]) : this.lifetime.signal;
       const result = await this.search.search(validate('search', args), combined);
       combined.throwIfAborted();
@@ -149,21 +152,23 @@ export class EgoWorld implements World {
       return { text: error instanceof Error ? error.message : String(error), failed: true };
     }
   }
+  private canDeliverResult(ctx: ToolCallContext): boolean {
+    return typeof ctx.queueExternalEvents === 'function' && typeof this.host?.drainPendingEvents === 'function';
+  }
   private async externalOutcome(tool: string, outcome: ToolOutcome, ctx: ToolCallContext): Promise<ToolOutcome> {
     const host = this.host;
     if (!host) return { text: 'Ego result could not be delivered because the World is stopped.', failed: true };
+    const queue = ctx.queueExternalEvents;
+    if (!queue || typeof host.drainPendingEvents !== 'function') return { text: RESULT_SESSION_REQUIRED, failed: true };
     const resultId = randomUUID();
-    const queue = typeof host.drainPendingEvents === 'function' ? ctx.queueExternalEvents : undefined;
     try {
       const event = await host.pushEvent({ type: 'ego.result', source: this.id, senderKey: this.id,
         ts: nowIso(this.options.timezone), origin: 'external',
         text: `${tool} result ${resultId}\n${outcome.text}`, blobs: outcome.blobs,
-        meta: { tool, resultId, callId: ctx.callId } }, { trigger: queue ? 'piggyback' : 'debounce' });
+        meta: { tool, resultId, callId: ctx.callId } }, { trigger: 'piggyback' });
       if (event.contextDelivery === 'archive-only') return { text: 'Ego result was archived. Enable Ego events to receive results.', failed: true };
-      if (queue) {
-        // Only move this result into the current tool round. Leave unrelated batches on the bus.
-        queue(await host.drainPendingEvents(pending => pending.cursor === event.cursor));
-      }
+      // Only move this result into the current tool round. Leave unrelated batches on the bus.
+      queue(await host.drainPendingEvents(pending => pending.cursor === event.cursor));
       return { text: `See external event ego.result ${resultId} for ${tool}.`, ...(outcome.failed && { failed: true }) };
     } catch (error) {
       this.reportCommandError(`Could not deliver ${tool} result: ${String(error)}`);
@@ -231,7 +236,7 @@ export class EgoWorld implements World {
       invoke: async (panel, method, args) => {
         if (panel === 'search') return this.invokeSearchPanel(method, args, zh);
         if (panel !== 'control') throw new Error('Unknown panel');
-        if (method === 'status') return this.helper.probe().then(online => { this.helperOnline = online; return this.status(); });
+        if (method === 'status') return this.helper.status().then(status => { this.helperStatus = status; return this.status(); });
         // Invalidate queued/in-flight probes before waiting for the serial command queue.
         if (method === 'stop-helper') {
           this.clearSpaceRecovery(); this.clearControlCheck();
@@ -246,7 +251,7 @@ export class EgoWorld implements World {
             this.clearSpaceRecovery();
             this.clearControlCheck();
             if (this.transport?.selected === 'helper') this.clearPlaybackKeepalive();
-            await this.helper.stop(); this.helperOnline = false;
+            await this.helper.stop(); this.helperStatus = 'offline';
             if (this.transport?.selected === 'helper') {
               this.cancelWatch(); this.connected = false;
               if (!this.saved.halted) { this.saved.code = 'EGO_HELPER_UNAVAILABLE'; this.saved.reason = 'The operator stopped the ordinary-permission helper.'; await this.save(); }
@@ -317,7 +322,8 @@ export class EgoWorld implements World {
     checkingControl: this.running && this.canCheckControl() && (!!this.controlTimer || this.checkingControl),
     sampling: this.watch ? this.samplingStatus(this.watch) : null,
     connectionMode: this.options.cfg.connectionMode || 'auto', transport: this.transport?.selected ?? 'direct',
-    helperOnline: this.helperOnline, helperDir: this.helperDir, launcherFile: this.launcherFile, canPrepareHelper: process.platform === 'win32' }; }
+    helperOnline: this.helperStatus === 'ready', helperOutdated: this.helperStatus === 'incompatible',
+    helperDir: this.helperDir, launcherFile: this.launcherFile, canPrepareHelper: process.platform === 'win32' }; }
   async start(host: WorldHost): Promise<void> {
     this.host = host; this.running = true; this.lifetime = new AbortController();
     this.lastCommandError = undefined;
@@ -604,7 +610,7 @@ export class EgoWorld implements World {
       throw new BrowserCommandError(`${receipt.code ? `${receipt.code}: ` : ''}${receipt.error}`,
         `Ego command failed (${publicFailureCode(receipt.code)}). ${hint}`);
     }
-    if (this.transport?.selected === 'helper') this.helperOnline = true;
+    if (this.transport?.selected === 'helper') this.helperStatus = 'ready';
     this.playbackRoundRetry = 0;
     this.schedulePlaybackKeepalive();
     return receipt.value;

@@ -55,7 +55,8 @@ export function mount(ctx: WebUiPanelContext): void {
     if (view.canResume) actions.append(button(say(status.code === 'EGO_TASK_SPACE_USER_IN_CONTROL' ? '交还 bot' : '已核对，恢复操作', 'Checked: return control'), 'resume', true));
     if (view.canHandoff) actions.append(button(say('我要操作浏览器', 'Take browser control'), 'handoff'));
     if (view.canPause) actions.append(button(say('暂停视频观看', 'Pause video watching'), 'pause'));
-    helperState.textContent = status.helperOnline ? say('助手在线', 'Helper online') : say('助手未启动', 'Helper not running');
+    helperState.textContent = status.helperOutdated ? say('旧版助手在线', 'Incompatible helper online')
+      : status.helperOnline ? say('助手在线', 'Helper online') : say('助手未启动', 'Helper not running');
     helper.note.textContent = helperState.textContent;
     const needsSetup = view.needsHelper && !status.connected && !status.halted;
     if (helper.el instanceof HTMLDetailsElement && needsSetup !== neededSetup) helper.el.open = needsSetup;
@@ -64,7 +65,7 @@ export function mount(ctx: WebUiPanelContext): void {
     helperActions.replaceChildren();
     if (view.canPrepare) helperActions.append(button(say(status.launcherFile ? '重新生成启动脚本' : '生成启动脚本', 'Generate launcher'), 'prepare-helper', !status.launcherFile));
     if (status.launcherFile) helperActions.append(button(say('打开助手目录', 'Open helper folder'), 'open-helper-folder'));
-    if (status.helperOnline) helperActions.append(button(say('停止助手', 'Stop helper'), 'stop-helper'));
+    if (view.canStopHelper) helperActions.append(button(say('停止助手', 'Stop helper'), 'stop-helper'));
     message.textContent = actionError ? say('操作未成功，请按当前状态的提示处理。原始错误在诊断详情中。', 'The action failed. Follow the current status guidance; diagnostics include the original error.') : '';
     raw.textContent = JSON.stringify({ ...status, actionError: actionError || undefined }, null, 2);
   }

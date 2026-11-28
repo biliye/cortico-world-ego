@@ -37,6 +37,7 @@ let resultBlobs: Map<string, ToolOutcome['blobs']>;
 let cfg: typeof EGO_DEFAULTS;
 let blobs: WorldHost['blob'];
 function host(bus?: WakeBus): WorldHost {
+  const pending = new Set<EventEnvelope>();
   const pushEvent: WorldHost['pushEvent'] = async ({ blobs: attachments, ...event }, opts) => {
     const deliver = opts?.deliver !== false;
     const envelope: EventEnvelope = { ...event, cursor: events.length + 1, origin: event.origin ?? 'external',
@@ -44,14 +45,20 @@ function host(bus?: WakeBus): WorldHost {
     events.push(envelope);
     if (event.type === 'ego.result' && typeof event.meta?.resultId === 'string') resultBlobs.set(event.meta.resultId, attachments);
     if (deliver) bus?.push({ event: envelope }, { trigger: opts?.trigger });
+    if (deliver && !bus && event.type === 'ego.result') pending.add(envelope);
     return envelope;
   };
   return { log: nullLogger(), blob: (handle: string) => blobs(handle), pushEvent,
-    drainPendingEvents: async (filter: (event: EventEnvelope) => boolean) => (bus?.drainPending(item => !!item.event && filter(item.event)) ?? []).map(item => item.event!),
+    drainPendingEvents: async (filter: (event: EventEnvelope) => boolean) => {
+      if (bus) return bus.drainPending(item => !!item.event && filter(item.event)).map(item => item.event!);
+      const drained = [...pending].filter(filter);
+      for (const event of drained) pending.delete(event);
+      return drained;
+    },
     pushDeferred: (e: DeferredEventSpec) => { deferred.push(e); } } as unknown as WorldHost;
 }
 async function rawCall(name: string, args: Record<string, unknown> = {}, context: Partial<ToolCallContext> = {}): Promise<ToolOutcome> {
-  const value = await world.tools().find(t => t.name === `ego_${name}`)!.handler(args, { role: 'test', log: nullLogger(), ...context });
+  const value = await world.tools().find(t => t.name === `ego_${name}`)!.handler(args, { role: 'test', log: nullLogger(), queueExternalEvents: () => {}, ...context });
   return typeof value === 'string' ? { text: value } : value;
 }
 async function call(name: string, args: Record<string, unknown> = {}): Promise<ToolOutcome> {
@@ -356,6 +363,22 @@ describe('contract and tools', () => {
   it('pages long snapshots without losing the continuation position', async () => {
     const result = await call('read', { page: 'p1', offset: 2, maxChars: 100 });
     expect(result.text).toContain('offset=2 end=10 totalChars=10 truncated=false\ncdefghij');
+  });
+  it('rejects browser commands and searches before any work when the session cannot receive external results', async () => {
+    await world.stop();
+    const searchRequest = vi.fn();
+    world = new EgoWorld({ cfg, dataDir: dir, botDir: dir, timezone: 'Asia/Shanghai', bridge: browser, searchRequest });
+    await world.start(host());
+    const callCount = browser.calls.length;
+    const eventCount = events.length;
+    const fork = { role: 'fork', queueExternalEvents: undefined };
+    for (const [tool, args] of [['read', { page: 'p1' }], ['click', { page: 'p1', selector: '@1' }], ['search', { query: 'example' }]] as const) {
+      expect(await rawCall(tool, args, fork)).toMatchObject({ failed: true, text: expect.stringContaining('Use this tool in the main session') });
+    }
+    expect(browser.calls).toHaveLength(callCount);
+    expect(searchRequest).not.toHaveBeenCalled();
+    expect(events).toHaveLength(eventCount);
+    expect((await rawCall('wait', { seconds: 0 }, fork)).failed).toBeUndefined();
   });
   it('delivers page content after the tool receipt without flushing an unrelated pending message', async () => {
     vi.useFakeTimers();

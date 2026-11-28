@@ -1,11 +1,12 @@
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { build } from 'esbuild';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, mkdir, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { HelperBridge, readEndpoint } from '../src/helper-bridge.ts';
+import { HELPER_PROTOCOL, HelperBridge, readEndpoint } from '../src/helper-bridge.ts';
+import { startHelper } from '../src/helper.ts';
 
 const windows = it.runIf(process.platform === 'win32');
 let root: string, helperDir: string, bundle: string, encoded: string;
@@ -28,7 +29,7 @@ afterEach(async () => {
   if (process.platform !== 'win32' || !root) return;
   const helper = new HelperBridge(helperDir, () => 1000);
   const endpoint = await readEndpoint(helperDir).catch(() => undefined);
-  if (await helper.probe()) {
+  if (await helper.status() !== 'offline') {
     await helper.stop();
   }
   if (endpoint) {
@@ -97,8 +98,8 @@ windows('starts the bundled ordinary-permission helper without touching a browse
   const endpoint = await readEndpoint(helperDir);
   expect(result.stdout + result.stderr).not.toContain(endpoint.token);
 });
-windows('requires authenticated readiness and does not launch or overwrite logs on a second run', async () => {
-  await writeFile(bundle, `
+async function writeHelperFixture(file: string, protocol: number) {
+  await writeFile(file, `
     import {createServer} from 'node:http';
     import {writeFile,unlink} from 'node:fs/promises';
     import {join} from 'node:path';
@@ -106,16 +107,22 @@ windows('requires authenticated readiness and does not launch or overwrite logs 
     const server=createServer((req,res)=>{
       if(req.headers.authorization!=='Bearer '+token){res.writeHead(401);res.end();return;}
       res.setHeader('content-type','application/json');
-      res.end(JSON.stringify({protocol:2,elevated:false,pid:process.pid}));
-      if(req.url==='/shutdown')server.close(()=>unlink(join(dir,'endpoint.json')));
+      res.end(JSON.stringify({protocol:${protocol},elevated:false,pid:process.pid}));
+      if(req.url==='/shutdown'){
+        server.closeIdleConnections();
+        server.close(()=>unlink(join(dir,'endpoint.json')));
+      }
     });
     server.listen(0,'127.0.0.1',async()=>{
       console.error('preserve-existing-log');
       // A partially written endpoint must not be mistaken for readiness.
       await writeFile(join(dir,'endpoint.json'),'{');
-      setTimeout(async()=>{await writeFile(join(dir,'endpoint.json'),JSON.stringify({protocol:2,port:server.address().port,token,pid:process.pid}));},300);
+      setTimeout(async()=>{await writeFile(join(dir,'endpoint.json'),JSON.stringify({protocol:${protocol},port:server.address().port,token,pid:process.pid}));},300);
     });
   `);
+}
+windows('requires authenticated readiness and does not launch or overwrite logs on a second run', async () => {
+  await writeHelperFixture(bundle, HELPER_PROTOCOL);
   const first = await launch();
   expect(first.code).toBe(0);
   expect(await new HelperBridge(helperDir, () => 1000).probe()).toBe(true);
@@ -129,3 +136,31 @@ windows('requires authenticated readiness and does not launch or overwrite logs 
   expect((await readEndpoint(helperDir)).pid).toBe(endpoint.pid);
   expect(await readFile(join(helperDir, 'helper.stderr.log'), 'utf8')).toBe(originalLog);
 });
+windows('refuses to reuse a running protocol 2 helper and starts the new helper after authenticated stop', async () => {
+  const oldBundle = join(root, 'legacy-helper.mjs');
+  await writeHelperFixture(oldBundle, 2);
+  await writeHelperFixture(bundle, HELPER_PROTOCOL);
+  const legacy = spawn(process.execPath, [oldBundle, '--dir', helperDir], { windowsHide: true, stdio: 'ignore' });
+  try {
+    await vi.waitFor(async () => expect((await readEndpoint(helperDir)).pid).toBe(legacy.pid), { timeout: 3000 });
+    const helper = new HelperBridge(helperDir, () => 1000);
+    expect(await helper.status()).toBe('incompatible');
+    expect(await helper.probe()).toBe(false);
+    expect(await helper.run('tabs', {})).toMatchObject({ code: 'EGO_HELPER_VERSION', uncertain: false });
+    await expect(startHelper({ dir: helperDir, checkElevated: async () => false })).rejects.toThrow('EGO_HELPER_VERSION');
+    const blocked = await launch();
+    expect(blocked.code).toBe(1);
+    expect(blocked.stdout).toContain('旧版 Ego 助手');
+    expect((await readEndpoint(helperDir)).pid).toBe(legacy.pid);
+    await expect(readFile(join(helperDir, 'helper.stderr.log'))).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await helper.stop();
+    await vi.waitFor(async () => expect(await helper.status()).toBe('offline'), { timeout: 3000 });
+    const updated = await launch();
+    expect(updated.code).toBe(0);
+    expect(await helper.probe()).toBe(true);
+    expect((await readEndpoint(helperDir)).protocol).toBe(HELPER_PROTOCOL);
+  } finally {
+    if (legacy.exitCode === null && legacy.signalCode === null) legacy.kill();
+  }
+}, 20000);

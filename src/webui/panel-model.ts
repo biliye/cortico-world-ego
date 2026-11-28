@@ -7,7 +7,7 @@ export interface EgoPanelStatus {
   evaluation?: EvaluationTimeout; evaluationRecoveryBlocked?: string; lastUnknownEvaluation?: EvaluationTimeout;
   sampling?: { batch: number; current: SamplingSummary; pending: SamplingSummary | null } | null;
   connectionMode: 'auto' | 'direct' | 'helper'; transport: 'direct' | 'helper';
-  helperOnline: boolean; helperDir: string; launcherFile: string; canPrepareHelper: boolean;
+  helperOnline: boolean; helperOutdated?: boolean; helperDir: string; launcherFile: string; canPrepareHelper: boolean;
 }
 export function panelView(status: EgoPanelStatus, zh = true) {
   const say = (cn: string, en: string) => zh ? cn : en;
@@ -55,6 +55,9 @@ export function panelView(status: EgoPanelStatus, zh = true) {
   } else if (status.code === 'EGO_APP_NOT_FOUND') {
     title = say('启动器未找到 Ego Lite', 'The launcher could not find Ego Lite');
     detail = say('请确认 Ego Lite 已安装，手动打开后再连接浏览器。', 'Check that Ego Lite is installed, open it manually, then retry the connection.');
+  } else if (needsHelper && status.helperOutdated) {
+    title = say('旧版助手仍在运行', 'An older helper is still running');
+    detail = say('展开助手卡片，点击「停止助手」，再重新生成并运行启动脚本。', 'Open the helper section, select Stop helper, then regenerate and run the launcher.');
   } else if (needsHelper && !status.helperOnline) {
     title = say('需要启动普通权限助手', 'Start the ordinary-permission helper');
     detail = say('宿主可继续使用管理员权限。Ego 的连接由普通权限助手执行。', 'The host can stay elevated. The helper runs Ego commands without elevation.');
@@ -68,5 +71,6 @@ export function panelView(status: EgoPanelStatus, zh = true) {
     canHandoff: status.running && status.connected && !status.halted,
     canPause: status.running && !!status.watching && !status.halted,
     canPrepare: status.running && status.canPrepareHelper,
+    canStopHelper: status.running && !!(status.helperOnline || status.helperOutdated),
   };
 }

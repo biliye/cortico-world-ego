@@ -19,7 +19,9 @@ export async function startHelper(options: { dir: string; cliFile?: string; time
   if (await (options.checkElevated ?? isElevated)()) throw new Error('EGO_CLIENT_ELEVATED: 普通权限助手不能以管理员身份运行。请在文件资源管理器中双击启动脚本，不要从管理员命令行启动。');
   const dir = resolve(options.dir);
   await mkdir(dir, { recursive: true });
-  if (await new HelperBridge(dir, () => 45000).probe()) throw new Error('EGO_HELPER_ALREADY_RUNNING: This directory already has a running helper.');
+  const status = await new HelperBridge(dir, () => 45000).status();
+  if (status === 'incompatible') throw new Error('EGO_HELPER_VERSION: Stop the old helper before starting the updated helper.');
+  if (status === 'ready') throw new Error('EGO_HELPER_ALREADY_RUNNING: This directory already has a running helper.');
   const token = randomBytes(32).toString('hex');
   const bridge = options.bridge ?? new CliBridge({ cliFile: options.cliFile || 'ego-browser', dataDir: dir, timeoutMs: () => options.timeoutMs ?? 45000,
     runtimeUrl: new URL('../src/bridge-runtime.mjs', import.meta.url).href });

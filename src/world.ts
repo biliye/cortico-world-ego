@@ -878,6 +878,8 @@ function validate(operation: string, input: Record<string, unknown>): Record<str
   const args = { ...input };
   const spec = EGO_TOOL_DECLS.find(t => t.name === `ego_${operation}`)!;
   const properties = spec.parameters.properties as Record<string, { type?: string }>;
+  const extra = Object.keys(args).find(key => !Object.hasOwn(properties, key));
+  if (extra !== undefined) throw new Error(`Unknown parameter: ${extra}`);
   for (const key of spec.parameters.required as string[]) {
     if (args[key] === undefined) throw new Error(`${key} is required.`);
     if (properties[key]?.type === 'string' && (typeof args[key] !== 'string' || (key !== 'text' && !String(args[key]).trim()))) throw new Error(`${key} must be a non-empty string.`);

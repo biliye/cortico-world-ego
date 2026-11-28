@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execute } from '../src/bridge-runtime.mjs';
+import { normalizeFailure } from '../src/failures.ts';
 import { MAX_FILE_BYTES } from '../src/file-transfer.mjs';
 import { createContext, runInContext, runInNewContext } from 'node:vm';
 let dir: string;
@@ -111,6 +112,17 @@ it('returns stable control-stop codes to the World', async () => {
   vi.stubGlobal('taskSpace', async () => { throw Object.assign(new Error('operator control'), { error_code: 'EGO_TASK_SPACE_USER_IN_CONTROL' }); });
   const result = await execute({ operation: 'tabs', args: {} });
   expect(result.code).toBe('EGO_TASK_SPACE_USER_IN_CONTROL');
+});
+it('keeps unstructured page diagnostics out of transport error classification', async () => {
+  const message = 'Page diagnostic mentioning EGO_TASK_SPACE_NOT_FOUND and ENOENT';
+  page.evaluate = vi.fn().mockRejectedValue(new Error(message));
+  const result = await execute({ operation: 'evaluate', args: { page: 'p1', expression: 'document.title' } });
+  expect(normalizeFailure(result)).toMatchObject({ spaceId: 1, error: message, code: 'EGO_OPERATION_FAILED', uncertain: false });
+});
+it('preserves recognition of a legacy missing Space during selection', async () => {
+  vi.stubGlobal('taskSpace', vi.fn().mockRejectedValue(new Error('task space not found: 1')));
+  const result = await execute({ operation: 'tabs', args: { spaceId: 1 } });
+  expect(normalizeFailure(result)).toMatchObject({ code: 'EGO_TASK_SPACE_NOT_FOUND', uncertain: false });
 });
 it('checks playback in the specified Space without capturing or touching player state', async () => {
   const video = { tagName: 'VIDEO', paused: false, ended: false,

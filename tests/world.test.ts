@@ -323,6 +323,12 @@ describe('contract and tools', () => {
     const result = await call('read', { page: 'p1', offset: 2, maxChars: 100 });
     expect(result.text).toContain('offset=2 end=10 totalChars=10 truncated=false\ncdefghij');
   });
+  it('rejects undeclared tool parameters before forwarding them to the bridge', async () => {
+    const count = browser.calls.length;
+    expect(await call('tabs', { playback: [] })).toMatchObject({ failed: true, text: 'Unknown parameter: playback' });
+    expect(await call('video', { page: 'p1', action: 'play', collecting: true })).toMatchObject({ failed: true, text: 'Unknown parameter: collecting' });
+    expect(browser.calls).toHaveLength(count);
+  });
   it('normalizes BV ids and rejects non-web schemes', async () => {
     expect(normalizeUrl('BV1xx411c7mD')).toBe('https://www.bilibili.com/video/BV1xx411c7mD');
     expect((await call('open', { url: 'javascript:alert(1)' })).failed).toBe(true);
@@ -529,16 +535,23 @@ describe('control boundaries', () => {
   });
   it.each(['read', 'tabs'])('automatically checks %s timeouts without replaying the failed observation', async (op: string) => {
     vi.useFakeTimers(); browser.next = { error: 'timed out', code: 'EGO_COMMAND_TIMEOUT', uncertain: true };
-    expect((await call(op, { page: 'p1' })).failed).toBe(true);
+    expect((await call(op, op === 'read' ? { page: 'p1' } : {})).failed).toBe(true);
     expect(world.status()).toMatchObject({ halted: true, checkingControl: true });
     const count = browser.calls.length;
     browser.next = { spaceId: 1, value: { control: 'agent' } }; await controlTick(2000);
     expect(world.status()).toMatchObject({ halted: false, connected: true });
     expect(browser.calls.slice(count).map(c => c.op)).toEqual(['control-status']);
   });
-  it.each(['click', 'fill', 'press', 'evaluate', 'video'])('keeps uncertain %s timeouts stopped across restart', async (op: string) => {
+  const uncertainOperations: [string, Record<string, unknown>][] = [
+    ['click', { page: 'p1', selector: '@1' }],
+    ['fill', { page: 'p1', selector: '@1', text: 'x' }],
+    ['press', { page: 'p1', selector: '@1', key: 'Enter' }],
+    ['evaluate', { page: 'p1', expression: 'document.title' }],
+    ['video', { page: 'p1', action: 'inspect' }],
+  ];
+  it.each(uncertainOperations)('keeps uncertain %s timeouts stopped across restart', async (op, args) => {
     vi.useFakeTimers(); browser.next = { error: 'timed out', code: 'EGO_COMMAND_TIMEOUT', uncertain: true };
-    await call(op, { page: 'p1', selector: '@1', text: 'x', key: 'Enter', expression: 'submit()', action: 'inspect' });
+    expect(await call(op, args)).toMatchObject({ failed: true, text: expect.stringContaining('EGO_COMMAND_TIMEOUT') });
     const count = browser.calls.length; await controlTick(120000); await world.stop(); await world.start(host()); await controlTick(120000);
     expect(world.status()).toMatchObject({ halted: true, checkingControl: false }); expect(browser.calls).toHaveLength(count);
   });

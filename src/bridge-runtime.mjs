@@ -12,12 +12,12 @@ const PLAYBACK_IFRAME_BUDGET_MS = 2000;
 
 function errorCode(error) {
   for (let e = error, i = 0; e && i < 5; e = e.cause, i++) {
-    if (e.error_code || e.code) return e.error_code || e.code;
+    if (typeof e.error_code === 'string' && e.error_code) return e.error_code;
+    if (typeof e.code === 'string' && e.code) return e.code;
   }
-  return String(error).match(/EGO_[A-Z_]+/)?.[0];
 }
 function isPlaybackSpaceFailure(error) {
-  return /^EGO_TASK_(SPACE_|HOST_)/.test(errorCode(error) ?? '') || /^task space not found:\s*\d+\s*$/i.test(error.message);
+  return /^EGO_TASK_(SPACE_|HOST_)/.test(errorCode(error) ?? '');
 }
 export async function execute({ operation, args }) {
   let task;
@@ -75,8 +75,9 @@ export async function execute({ operation, args }) {
         await page.goto(args.url, { timeout: 30000 });
         value = { page: page.label, url: await page.url(), snapshot: await page.snapshot() };
       } catch (error) {
-        if (errorCode(error)?.startsWith('EGO_TASK_') || error.mayHaveLateEffects) throw error;
-        return { spaceId: task.spaceId, error: `page=${page.label}: ${error.message}`, code: errorCode(error) };
+        const code = errorCode(error);
+        if (code?.startsWith('EGO_TASK_') || error?.mayHaveLateEffects) throw error;
+        return { spaceId: task.spaceId, error: `page=${page.label}: ${error?.message ?? String(error)}`, code: code ?? 'EGO_OPERATION_FAILED' };
       }
     } else {
       const tabs = await task.tabs();
@@ -109,7 +110,9 @@ export async function execute({ operation, args }) {
     }
     return { spaceId: task.spaceId, value: value ?? null };
   } catch (error) {
-    const code = errorCode(error);
+    // Once a Space is selected, diagnostics can include page text. A generic code
+    // keeps the host's legacy transport fallbacks from interpreting that text.
+    const code = errorCode(error) ?? (task ? 'EGO_OPERATION_FAILED' : undefined);
     const evaluation = code === 'EGO_PAGE_EVALUATION_TIMED_OUT' ? {
       page: args.page,
       timeoutMs: Number.isFinite(error.timeoutMs) ? error.timeoutMs : undefined,
@@ -117,7 +120,7 @@ export async function execute({ operation, args }) {
       pageResponsive: typeof error.pageResponsive === 'boolean' ? error.pageResponsive : undefined,
       mayHaveLateEffects: typeof error.mayHaveLateEffects === 'boolean' ? error.mayHaveLateEffects : undefined,
     } : undefined;
-    return { spaceId: task?.spaceId, error: error.message ?? String(error), code, uncertain: !!evaluation || !!error.mayHaveLateEffects, ...(evaluation ? { evaluation } : {}) };
+    return { spaceId: task?.spaceId, error: error?.message ?? String(error), code, uncertain: !!evaluation || !!error?.mayHaveLateEffects, ...(evaluation ? { evaluation } : {}) };
   }
 }
 async function inventory(task) {

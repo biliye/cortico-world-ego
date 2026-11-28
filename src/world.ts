@@ -930,7 +930,9 @@ export class EgoWorld implements World {
   }
   private async reportCommandError(diagnostic: string): Promise<void> {
     this.lastCommandError = diagnostic;
-    await this.event('state', `Ego command failed: ${diagnostic}`, 'external');
+    // Keep the raw diagnostic out of the event body if Core replays the archive after a restart.
+    await this.host?.pushEvent({ type: 'ego.state', source: this.id, senderKey: this.id, ts: nowIso(this.options.timezone),
+      text: 'Ego command failed. See the World panel for diagnostics.', origin: 'external', meta: { diagnostic } }, { deliver: false });
   }
 }
 export function normalizeUrl(input: string): string {

@@ -10,6 +10,7 @@ import { EGO } from '../src/definition.ts';
 import { MAX_FILE_BYTES } from '../src/file-transfer.mjs';
 import type { BridgeReceipt, EgoBridge } from '../src/bridge.ts';
 import type { DeferredEventSpec, EventEnvelope, WorldHost, ToolOutcome } from 'cortico/core/types.ts';
+import { WakeBus } from 'cortico/core/bus.ts';
 import { nullLogger } from 'cortico/core/util.ts';
 
 class Browser implements EgoBridge {
@@ -34,8 +35,16 @@ let dir: string, world: EgoWorld, browser: Browser;
 let events: EventEnvelope[], deferred: DeferredEventSpec[];
 let cfg: typeof EGO_DEFAULTS;
 let blobs: WorldHost['blob'];
-function host(): WorldHost {
-  return { log: nullLogger(), blob: (handle: string) => blobs(handle), pushEvent: async (e: any) => { events.push(e); return e; }, pushDeferred: (e: DeferredEventSpec) => { deferred.push(e); } } as unknown as WorldHost;
+function host(bus?: WakeBus): WorldHost {
+  const pushEvent: WorldHost['pushEvent'] = async ({ blobs: _blobs, ...event }, opts) => {
+    const deliver = opts?.deliver !== false;
+    const envelope: EventEnvelope = { ...event, cursor: events.length + 1, origin: event.origin ?? 'external',
+      contextDelivery: deliver ? 'deliver' : 'archive-only' };
+    events.push(envelope);
+    if (deliver) bus?.push({ event: envelope }, { trigger: opts?.trigger });
+    return envelope;
+  };
+  return { log: nullLogger(), blob: (handle: string) => blobs(handle), pushEvent, pushDeferred: (e: DeferredEventSpec) => { deferred.push(e); } } as unknown as WorldHost;
 }
 async function call(name: string, args: Record<string, unknown> = {}): Promise<ToolOutcome> {
   const value = await world.tools().find(t => t.name === `ego_${name}`)!.handler(args, { role: 'test', log: nullLogger() });
@@ -170,7 +179,8 @@ it.each(['target-unavailable', 'error', 'empty', 'available'])('exposes structur
   expect(result.text).toContain('"aid":170001');
   if (result.failed) {
     expect(result.text).not.toContain(diagnostic);
-    expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', text: expect.stringContaining(diagnostic) });
+    expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', contextDelivery: 'archive-only',
+      meta: { diagnostic: expect.stringContaining(diagnostic) } });
     expect(world.status().lastCommandError).toContain(diagnostic);
   }
   expect(browser.calls.at(-1)).toMatchObject({ op: 'bilibili', args: { aid: 170001 } });
@@ -836,7 +846,8 @@ describe('control boundaries', () => {
     expect(result.text).toContain('page=p2'); expect(result.failed).toBe(true);
     expect(result.text).toContain('EGO_OPERATION_FAILED');
     expect(result.text).not.toContain('net::ERR_NAME_NOT_RESOLVED');
-    expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', text: expect.stringContaining(error) });
+    expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', contextDelivery: 'archive-only',
+      meta: { diagnostic: expect.stringContaining(error) } });
     expect(world.status().lastCommandError).toContain(error);
     expect((await call('tabs')).failed).toBeUndefined();
   });
@@ -847,7 +858,41 @@ describe('control boundaries', () => {
     expect(result).toMatchObject({ failed: true, text: expect.stringContaining('EGO_OPERATION_FAILED') });
     expect(result.text).not.toContain(code);
     expect(result.text).not.toContain('Original browser diagnostic');
-    expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', text: expect.stringContaining(code) });
+    expect(events.at(-1)).toMatchObject({ type: 'ego.state', origin: 'external', contextDelivery: 'archive-only',
+      meta: { diagnostic: expect.stringContaining(code) } });
+  });
+  it('archives ordinary failures without waking or flushing the bus and still delivers control loss immediately', async () => {
+    vi.useFakeTimers();
+    const bus = new WakeBus({ quietGapMs: 1000, minBatchAgeMs: 1000, maxBatchAgeMs: 5000, maxBatchSize: 10 });
+    await world.stop();
+    const worldHost = host(bus);
+    await world.start(worldHost);
+    expect(bus.takeIfReady()).toHaveLength(1);
+
+    const diagnostic = 'Browser detail for an expired ref';
+    const expireRef = async () => {
+      browser.next = { error: diagnostic, code: 'EGO_OPERATION_FAILED' };
+      expect(await call('click', { page: 'p1', selector: '@1' })).toMatchObject({ failed: true });
+    };
+    await expireRef();
+    expect(bus.takeIfReady()).toBeNull();
+    expect(bus.pending()).toBe(0);
+    expect(events.at(-1)).toMatchObject({ origin: 'external', contextDelivery: 'archive-only', meta: { diagnostic: expect.stringContaining(diagnostic) } });
+    expect(events.at(-1)?.text).not.toContain(diagnostic);
+    expect(world.status().lastCommandError).toContain(diagnostic);
+
+    const message = await worldHost.pushEvent({ type: 'chat.message', source: 'chat', ts: new Date().toISOString(), text: 'Wait for the batch.' });
+    await vi.advanceTimersByTimeAsync(500);
+    await expireRef();
+    expect(bus.takeIfReady()).toBeNull();
+    expect(bus.pending()).toBe(1);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(bus.takeIfReady()).toEqual([{ event: message }]);
+
+    browser.next = { error: 'Operator took control', code: 'EGO_TASK_SPACE_USER_IN_CONTROL' };
+    expect(await call('tabs')).toMatchObject({ failed: true });
+    expect(bus.takeIfReady()).toEqual([{ event: expect.objectContaining({ type: 'ego.state', origin: 'external',
+      contextDelivery: 'deliver', text: expect.stringContaining('Operator took control') }) }]);
   });
 });
 

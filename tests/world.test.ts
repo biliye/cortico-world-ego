@@ -196,6 +196,37 @@ describe('per-watch video-time sampling', () => {
     if (!rendered || typeof rendered === 'string') throw new Error('Missing scene');
     return JSON.parse(rendered.text.slice(rendered.text.indexOf('\n', rendered.text.indexOf('totalChars=')) + 1));
   }
+  it('sends only time, text, and known likes for each danmaku in a look and an enriched scene', async () => {
+    vi.useFakeTimers();
+    videoFixture();
+    const danmaku = { status: 'partial', comments: [
+      { id: '1234567890987654321', mode: 1, time: 1.25, text: '好球', likes: 0 },
+      { id: '1234567890987654322', mode: 1, time: 2, text: '再看一次' },
+    ] };
+    const expected = { status: 'partial', comments: [
+      { time: 1.25, text: '好球', likes: 0 },
+      { time: 2, text: '再看一次' },
+    ] };
+    const run = browser.run.bind(browser);
+    browser.run = async (op, args) => {
+      if (args.action === 'watch-enrichment') {
+        return { spaceId: 1, value: { fixture: { complete: true, value: { danmaku } } } };
+      }
+      const receipt = await run(op, args);
+      if (args.action === 'look') {
+        if (args.batch === undefined) receipt.value.danmaku = danmaku;
+        else receipt.value.enrichmentId = 'fixture';
+      }
+      return receipt;
+    };
+
+    const look = await call('video', { page: 'p1', action: 'look' });
+    expect(JSON.parse(look.text.slice(look.text.indexOf('\n') + 1)).danmaku).toEqual(expected);
+    await call('video', { page: 'p1', action: 'watch' });
+    await advance(16_500);
+    expect((await batch(0)).danmaku).toEqual(expected);
+    expect(danmaku.comments[0]).toHaveProperty('id', '1234567890987654321');
+  });
   it('tunes at the next batch without losing queued mosaics or the previous tail frame', async () => {
     vi.useFakeTimers(); videoFixture();
     await call('video', { page: 'p1', action: 'watch', windowSec: 20, frameIntervalSec: 10 });

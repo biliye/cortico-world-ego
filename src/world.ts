@@ -595,7 +595,7 @@ export class EgoWorld implements World {
       if (action === 'look') value.observation = { phase: 'snapshot', watching: this.watch?.page === args.page, danmaku: videoArgs.danmaku,
         note: 'look captures now; it does not wait to collect a time window. For several frames within 15 seconds, call watch once and wait for ego.video.scene. Repeated watch restarts sampling.' };
       if (action === 'inspect' && watchOnPage && this.watch === watchOnPage) value.observation = { watching: true, ...this.samplingStatus(watchOnPage) };
-      return this.outcome(value);
+      return this.videoOutcome(value);
     }
     const startedAt = Date.now();
     const watch: Watch = { page: String(args.page), frameId: value.frameId, selector: args.selector as string | undefined, index: args.index as number | undefined,
@@ -608,7 +608,7 @@ export class EgoWorld implements World {
     if (!this.running || this.watch !== watch || this.generation !== watch.generation) return { text: 'Video collection stopped before the first frame was ready.' };
     if (!scene.found || scene.paused || scene.ended || scene.source !== watch.source) {
       this.cancelWatch(); scene.observation = { phase: scene.ended ? 'ended' : 'stopped', watching: false, note: 'Playback stopped before the first collection window. Only the actually captured frames are returned.' };
-      return this.outcome(scene);
+      return this.videoOutcome(scene);
     }
     watch.since = scene.time;
     this.updateTiming(watch, scene, startedAt);
@@ -616,7 +616,7 @@ export class EgoWorld implements World {
       nextEvent: 'ego.video.scene', note: 'Collection started. The first frame stays in the local buffer; the completed mosaic arrives as ego.video.scene. Do not restart watch between samples.' };
     delete scene.image; delete scene.capture; delete scene.frameTimes; delete scene.frameCount;
     this.schedule(watch);
-    return this.outcome(scene);
+    return this.videoOutcome(scene);
   }
   private async transferFile(operation: 'upload' | 'download', args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome> {
     const transferTimeoutMs = bounded(this.options.cfg.requestTimeoutMs, 5000, 120000, 45000) - 1500;
@@ -707,7 +707,7 @@ export class EgoWorld implements World {
     for (const scene of this.pendingScenes) {
       if (scene.enrichment) { this.scheduleVideoEnrichment(watch, pollDelay); break; }
       if (scene.value) {
-        scene.outcome = this.outcome(scene.value);
+        scene.outcome = this.videoOutcome(scene.value);
         scene.value = undefined;
       }
       ready++;
@@ -841,6 +841,12 @@ export class EgoWorld implements World {
       });
     }, Math.max(0, watch.nextSampleAt - Date.now()));
     this.timer.unref?.();
+  }
+  private videoOutcome(value: any): ToolOutcome {
+    const danmaku = value.danmaku;
+    if (!Array.isArray(danmaku?.comments)) return this.outcome(value);
+    const comments = danmaku.comments.map(({ time, text, likes }: { time: number; text: string; likes?: number }) => ({ time, text, likes }));
+    return this.outcome({ ...value, danmaku: { ...danmaku, comments } });
   }
   private outcome(value: any, offset = 0, maxChars = this.options.cfg.maxChars): ToolOutcome {
     const image = value && typeof value === 'object' ? value.image : undefined;

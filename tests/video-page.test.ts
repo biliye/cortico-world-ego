@@ -6,20 +6,78 @@ function fixture() {
   let now = 0;
   const video = { tagName: 'VIDEO', currentSrc: 'one', currentTime: 0, readyState: 4, videoWidth: 640, videoHeight: 360,
     duration: 120, paused: false, ended: false, textTracks: [], pause() { this.paused = true; } };
+  const canvases: Array<{ width: number; height: number; draws: number[][]; labels: string[] }> = [];
   const context = { Date: { now: () => now }, Image: class { async decode() {} },
-    document: { querySelectorAll: () => [video], createElement: () => ({ width: 0, height: 0,
-      getContext: () => ({ drawImage() {}, fillRect() {}, fillText() {} }), toDataURL: () => 'data:image/jpeg;base64,anBlZw==' }) } };
+    document: { querySelectorAll: () => [video], createElement: () => {
+      const canvas = { width: 0, height: 0, draws: [] as number[][], labels: [] as string[],
+        getContext: () => ({
+          drawImage(_image: unknown, ...rect: number[]) { canvas.draws.push(rect); },
+          fillRect() {}, fillText(label: string) { canvas.labels.push(label); },
+        }), toDataURL: () => 'data:image/jpeg;base64,anBlZw==' };
+      canvases.push(canvas);
+      return canvas;
+    } } };
   const op = runInNewContext(`(${videoOperation.toString()})`, context);
-  return { video, async capture(time: number, action = 'sample', extra = {}, wallTime = time) { now = wallTime * 1000; video.currentTime = time; return op({ action, maxFrames: 4, ...extra }); } };
+  return { video, canvases, async capture(time: number, action = 'sample', extra = {}, wallTime = time) { now = wallTime * 1000; video.currentTime = time; return op({ action, maxFrames: 4, ...extra }); } };
 }
-it('assembles samples from one interval and retains only its boundary for the next interval', async () => {
+it.each([
+  { frames: 4, cols: 2, rows: 2 },
+  { frames: 5, cols: 2, rows: 3 },
+  { frames: 6, cols: 2, rows: 3 },
+  { frames: 7, cols: 2, rows: 4 },
+  { frames: 8, cols: 2, rows: 4 },
+  { frames: 9, cols: 3, rows: 3 },
+])('lays out $frames actual frames in a $cols by $rows canvas without shrinking the frames', async ({ frames, cols, rows }) => {
+  const f = fixture();
+  const options = { maxFrames: 9, collecting: true };
+  const times = Array.from({ length: frames }, (_, i) => i);
+  for (const time of times.slice(0, -1)) await f.capture(time, 'sample', options);
+  const scene = await f.capture(frames - 1, 'look', options);
+  expect(scene.frameTimes).toEqual(times);
+  expect(f.canvases.at(-1)).toMatchObject({
+    width: cols * 640, height: rows * 386,
+    draws: times.map(i => [(i % cols) * 640, Math.floor(i / cols) * 386, 640, 360]),
+    labels: times.map(time => `${time.toFixed(2)} s`),
+  });
+});
+it('uses a wider layout for tall frames to shorten the longest canvas edge', async () => {
+  const f = fixture();
+  f.video.videoWidth = 360;
+  f.video.videoHeight = 640;
+  const options = { maxFrames: 8, collecting: true };
+  for (let time = 0; time < 7; time++) await f.capture(time, 'sample', options);
+  const scene = await f.capture(7, 'look', options);
+  expect(scene.frameCount).toBe(8);
+  expect(f.canvases.at(-1)).toMatchObject({ width: 4 * 640, height: 2 * 986 });
+});
+it.each([
+  { frames: 7, height: 640 },
+  { frames: 8, height: 640 },
+  { frames: 8, height: 480 },
+])('uses a 3 by 3 grid for $frames 640 by $height frames when it shortens the longest edge', async ({ frames, height }) => {
+  const f = fixture();
+  f.video.videoHeight = height;
+  const options = { maxFrames: 9, collecting: true };
+  for (let time = 0; time < frames - 1; time++) await f.capture(time, 'sample', options);
+  const scene = await f.capture(frames - 1, 'look', options);
+  expect(scene.frameCount).toBe(frames);
+  const grid = f.canvases.at(-1)!;
+  expect(grid).toMatchObject({ width: 1920, height: 3 * (height + 26) });
+  expect(grid.draws).toHaveLength(frames);
+  expect(grid.draws.every(([, , width, drawnHeight]) => width === 640 && drawnHeight === height)).toBe(true);
+});
+it('keeps the shared boundary when the next interval uses a different number of frames', async () => {
   const f = fixture();
   await f.capture(0, 'look'); await f.capture(5); const sample = await f.capture(10);
   expect(sample.image).toBe(null); expect(sample.frameTimes).toEqual([0, 5, 10]);
   const first = await f.capture(15, 'look', { consumeFrames: true });
   expect(first.frameTimes).toEqual([0, 5, 10, 15]); expect(first.image.mime).toBe('image/jpeg'); expect(first.capture).toBe('video-mosaic'); expect(first.frameCount).toBe(4);
-  await f.capture(20); await f.capture(25);
-  expect((await f.capture(30, 'look', { consumeFrames: true })).frameTimes).toEqual([15, 20, 25, 30]);
+  expect(f.canvases.at(-1)).toMatchObject({ width: 1280, height: 772 });
+  const nextBatch = { maxFrames: 6, collecting: true };
+  for (const time of [20, 25, 30, 35]) await f.capture(time, 'sample', nextBatch);
+  const second = await f.capture(40, 'look', { ...nextBatch, consumeFrames: true });
+  expect(second.frameTimes).toEqual([15, 20, 25, 30, 35, 40]);
+  expect(f.canvases.at(-1)).toMatchObject({ width: 1280, height: 1158 });
 });
 it('does not retain stale frames after stalled polling, backward seek, pause or source changes', async () => {
   const f = fixture(); await f.capture(0, 'look');

@@ -111,7 +111,7 @@ Ego 会在执行浏览器脚本之前拒绝管理员身份的 `ego-browser`，�
 
 实际墙钟发送间隔可能长于配置值。卡顿、循环和提前结束仍可能少于配置帧数，离散采样仍可能漏掉快速动作。
 
-首次 `watch` 返回 `observation.phase:"collecting"`；后续场景为 `scene`，提前播完则为 `ended` 并补发已采到的片尾画面。只有多于一帧才标记 `capture:"video-mosaic"`，一帧使用 `video-frame`。`frameCount` 与 `frameTimes` 是实际格数及视频秒数，顺序为从左到右、从上到下；时间也保留在不被正文长度限制截断的回执头和图片说明中。不能把单帧描述成多个时间点。
+首次 `watch` 返回 `observation.phase:"collecting"`；后续场景为 `scene`，提前播完则为 `ended` 并补发已采到的片尾画面。只有多于一帧才标记 `capture:"video-mosaic"`，一帧使用 `video-frame`。拼图按实际帧数和单帧宽高选布局，缩短画布最长边并保持每帧采集尺寸。5 帧留一格空白，7 或 8 帧在 3×3 能缩短最长边时允许留空。`frameCount` 与 `frameTimes` 是实际格数及视频秒数，顺序为从左到右、从上到下；正文截断时，回执头和图片说明仍带帧数和时间。完整媒体地址可用 `inspect` 查看。
 
 网页 `textTracks` 的字幕会读取为文字；B 站额外尝试通过当前登录页的播放器接口读取字幕，优先中文。视频抽帧不包含网页叠加的字幕和弹幕层。
 

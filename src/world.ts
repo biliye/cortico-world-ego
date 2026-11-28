@@ -613,7 +613,7 @@ export class EgoWorld implements World {
     watch.since = scene.time;
     this.updateTiming(watch, scene, startedAt);
     scene.observation = { phase: 'collecting', watching: true, intervalMs: plan.windowSec * 1000, ...samplingSummary(plan), batch: watch.batch,
-      nextEvent: 'ego.video.scene', note: 'Collection started. The first frame stays in the local buffer; the completed mosaic arrives as ego.video.scene. Do not restart watch between samples.' };
+      nextEvent: 'ego.video.scene', note: 'Wait for each scene without restarting watch. Read frameTimes in row order; there may be fewer frames than planned.' };
     delete scene.image; delete scene.capture; delete scene.frameTimes; delete scene.frameCount;
     this.schedule(watch);
     return this.videoOutcome(scene);
@@ -684,16 +684,15 @@ export class EgoWorld implements World {
   }
   private publishScene(watch: Watch, value: any, final = false): void {
     const times: number[] = value.frameTimes ?? [];
-    value.observation = { phase: final ? 'ended' : 'scene', ...(final ? { watching: false } : {}), final, intervalMs: watch.plan.windowSec * 1000,
+    value.observation = { phase: final ? 'ended' : 'scene', ...(final ? { watching: false } : {}), final,
       ...samplingSummary(watch.plan), batch: watch.batch, actualVideoSpanSec: times.length ? times[times.length - 1]! - times[0]! : 0,
-      maxActualGapSec: times.length > 1 ? Math.max(...times.slice(1).map((time, i) => time - times[i]!)) : 0,
-      note: final ? 'Playback ended. These are the frames actually collected before the end; watching has stopped.' : 'Completed observation window. Use frameTimes in row-major order; the actual frame count can be below the configured maximum.' };
+      maxActualGapSec: times.length > 1 ? Math.max(...times.slice(1).map((time, i) => time - times[i]!)) : 0 };
     if (watch.smoothWatch && this.pendingScenes.size >= MAX_PENDING_SCENES) {
       const oldest = this.pendingScenes.values().next().value!;
       this.pendingScenes.delete(oldest);
       watch.skipped = { batches: (watch.skipped?.batches ?? 0) + 1, from: watch.skipped?.from ?? oldest.from, to: oldest.to };
     }
-    const { enrichmentId, ...scene } = value;
+    const { enrichmentId, source, ...scene } = value;
     this.pendingScenes.add({ page: watch.page, from: watch.since, to: value.time, value: scene,
       ...(typeof enrichmentId === 'string' && { enrichment: { id: enrichmentId, expiresAt: Date.now() + VIDEO_ENRICHMENT_TIMEOUT_MS } }) });
     this.flushVideoScenes(watch);
@@ -852,14 +851,14 @@ export class EgoWorld implements World {
     const image = value && typeof value === 'object' ? value.image : undefined;
     const frameTimes = Array.isArray(value?.frameTimes) ? value.frameTimes.filter((n: unknown) => typeof n === 'number' && Number.isFinite(n)).slice(0, 9) : undefined;
     const capture = frameTimes?.length && /^video-(mosaic|frame)$/.test(value.capture ?? '') ? frameTimes.length > 1 ? 'video-mosaic' : 'video-frame' : value?.capture;
-    // Put frame metadata first and also in the untruncated header/attachment fallback.
+    // Put frame metadata first so full video receipts only need it once.
     const content = image ? { capture, frameCount: frameTimes?.length, frameTimes, observation: value.observation, ...value, image: undefined } : value;
     if (image) { content.capture = capture; if (frameTimes) { content.frameCount = frameTimes.length; content.frameTimes = frameTimes; } }
     const text = typeof content === 'string' ? content : JSON.stringify(content) ?? 'null';
     offset = bounded(offset, 0, text.length, 0);
     const limit = bounded(maxChars, 100, 60000, 16000);
     const end = Math.min(text.length, offset + limit);
-    const frameHeader = frameTimes ? ` frameCount=${frameTimes.length} frameTimes=${JSON.stringify(frameTimes)}` : '';
+    const frameHeader = frameTimes && (offset > 0 || end < text.length) ? ` frameCount=${frameTimes.length} frameTimes=${JSON.stringify(frameTimes)}` : '';
     const result: ToolOutcome = { text: `offset=${offset} end=${end} totalChars=${text.length} truncated=${end < text.length}${frameHeader}\n${text.slice(offset, end)}` };
     if (image?.base64 && /^image\/(jpeg|png)$/.test(image.mime)) result.blobs = [{ bytes: Buffer.from(image.base64, 'base64'), mime: image.mime, name: 'ego-frame.jpg', fallbackText: `Ego image: ${capture ?? 'page viewport'}; time=${value.time ?? 'n/a'} s.${frameHeader} Image understanding requires a vision-capable model.` }];
     if (image?.mime && this.host?.modelFacts?.accepts(image.mime) === false) result.text += '\nThe configured model does not accept this image MIME. It can read the returned subtitles; choose a vision-capable model to interpret the frames.';

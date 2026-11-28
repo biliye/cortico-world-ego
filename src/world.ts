@@ -19,6 +19,7 @@ import type { SearchRequest } from './search-http.ts';
 import { SEARCH_SECRETS, isWebSearchProvider, validateSearchSettings, type SearchSettings } from './search-settings.ts';
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 const RESULT_SESSION_REQUIRED = 'This session cannot receive Ego result events. Use this tool in the main session.';
+const PAGE_SCRIPTS_DISABLED = 'Page JavaScript is disabled in the Ego settings.';
 const UPLOAD_RETENTION_MS = 24 * 60 * 60 * 1000;
 const DOWNLOAD_EXTENSIONS: Readonly<Record<string, string>> = {
   'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif', 'image/webp': '.webp',
@@ -115,7 +116,9 @@ export class EgoWorld implements World {
   }
   envPromptVars(): Record<string, string> { return { 'ego.spaceName': this.spaceName }; }
   tools(): ToolDef[] {
-    return EGO_TOOL_DECLS.map(spec => {
+    const specs = this.options.cfg.allowPageScripts === true
+      ? EGO_TOOL_DECLS : EGO_TOOL_DECLS.filter(spec => spec.name !== 'ego_evaluate');
+    return specs.map(spec => {
       if (spec.name === 'ego_search') return { ...spec, interruptible: true, handler: (args, ctx) => this.searchPublic(args, ctx) };
       if (spec.name === 'ego_wait') return { ...spec, handler: (args, ctx) => this.wait(args, ctx.signal) };
       return { ...spec, handler: (args, ctx) => this.serial(async () => {
@@ -547,13 +550,21 @@ export class EgoWorld implements World {
     } finally { if (automatic) this.recoveringSpace = false; }
   }
   private async command(operation: string, args: Record<string, unknown>, signal?: AbortSignal, operatorResume = false, byName = false): Promise<any> {
+    const evaluate = operation === 'evaluate';
+    // The session can keep a stale handler, including while a command is queued.
+    if (evaluate && this.options.cfg.allowPageScripts !== true) {
+      throw new BrowserCommandError(PAGE_SCRIPTS_DISABLED, PAGE_SCRIPTS_DISABLED, true);
+    }
     const diagnostic = this.isEvaluationDiagnostic(operation);
     if (this.saved.halted && !operatorResume && !diagnostic) throw new BrowserCommandError(`Ego paused: ${this.saved.reason}`, this.pausedToolMessage(), true);
     signal?.throwIfAborted();
     const combined = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
     let receipt: BridgeReceipt;
     try {
-      receipt = normalizeFailure(await this.bridge.run(operation, { ...args, restoreMinimized: this.options.cfg.restoreMinimized, spaceId: byName ? undefined : this.saved.spaceId, spaceName: this.spaceName }, combined));
+      receipt = normalizeFailure(await this.bridge.run(operation, {
+        ...args, ...(evaluate && { allowPageScripts: true }), restoreMinimized: this.options.cfg.restoreMinimized,
+        spaceId: byName ? undefined : this.saved.spaceId, spaceName: this.spaceName,
+      }, combined));
     } catch (error) {
       throw new BrowserCommandError(String(error), 'Ego command failed (EGO_OPERATION_FAILED). Check the browser and the World panel before retrying.');
     }

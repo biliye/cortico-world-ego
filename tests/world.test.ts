@@ -353,11 +353,52 @@ afterEach(async () => { vi.useRealTimers(); await world.stop(); if (!dir.startsW
 
 describe('contract and tools', () => {
   it('matches self-description and declares all actually emitted events', () => {
+    const defaultTools = world.tools().map(t => t.name);
+    expect(defaultTools).not.toContain('ego_evaluate');
+    expect(EGO.defaults().allowPageScripts).toBe(false);
+    cfg.allowPageScripts = true;
     expect(world.tools().map(t => t.name)).toEqual(EGO.describe!.tools.map(t => t.name));
+    expect(world.tools().map(t => t.name).filter(name => name !== 'ego_evaluate')).toEqual(defaultTools);
     expect(events[0]).toMatchObject({ type: 'ego.state', origin: 'internal' });
     expect(EGO.describe!.events.map(e => e.type)).toEqual(['ego.result', 'ego.state', 'ego.video.state', 'ego.video.scene']);
-    expect(world.tools().map(t => t.name)).not.toContain('ego_evaluate');
     expect(EGO.defaults().enabled).toBe(false);
+  });
+  it('delivers opted-in evaluation results as external events and rejects caller-provided permission', async () => {
+    cfg.allowPageScripts = true;
+    const args = { page: 'p1', expression: 'document.title' };
+    const count = browser.calls.length;
+    const rejected = await rawCall('evaluate', { ...args, allowPageScripts: true });
+    expect(rejected).toMatchObject({ failed: true, text: 'Unknown parameter: allowPageScripts' });
+    expect(browser.calls).toHaveLength(count);
+
+    const content = 'Title from the managed fixture page';
+    browser.next = { spaceId: 1, value: content };
+    const queueExternalEvents = vi.fn();
+    const receipt = await rawCall('evaluate', args, { queueExternalEvents, callId: 'eval_call' });
+    const event = events.at(-1)!;
+    expect(browser.calls.at(-1)).toMatchObject({ op: 'evaluate', args: { ...args, allowPageScripts: true } });
+    expect(event).toMatchObject({ type: 'ego.result', origin: 'external', text: expect.stringContaining(content),
+      meta: { tool: 'ego_evaluate', callId: 'eval_call' } });
+    expect(receipt.text).toContain(String(event.meta?.resultId));
+    expect(receipt.text).not.toContain(content);
+    expect(queueExternalEvents.mock.calls).toEqual([[[event]]]);
+  });
+  it('revokes a cached evaluate handler before a queued call reaches the bridge', async () => {
+    cfg.allowPageScripts = true;
+    const cached = world.tools().find(tool => tool.name === 'ego_evaluate')!;
+    const ctx = { role: 'test', log: nullLogger(), queueExternalEvents: vi.fn() };
+    const args = { page: 'p1', expression: 'document.title' };
+    const count = browser.calls.length;
+
+    const pending = cached.handler(args, ctx);
+    cfg.allowPageScripts = false;
+    expect(world.tools().map(t => t.name)).not.toContain('ego_evaluate');
+    for (const result of [await pending, await cached.handler(args, ctx)]) {
+      expect(result).toMatchObject({ failed: true, text: 'Page JavaScript is disabled in the Ego settings.' });
+    }
+    expect(browser.calls).toHaveLength(count);
+    expect(ctx.queueExternalEvents).not.toHaveBeenCalled();
+    expect((await call('read', { page: 'p1' })).failed).toBeUndefined();
   });
   it('does not share nested config defaults', () => { const cfg1 = EGO.defaults(); cfg1.video.maxFrames = 9; expect(EGO.defaults().video.maxFrames).toBe(4); });
   it('pages long snapshots without losing the continuation position', async () => {
@@ -372,7 +413,9 @@ describe('contract and tools', () => {
     const callCount = browser.calls.length;
     const eventCount = events.length;
     const fork = { role: 'fork', queueExternalEvents: undefined };
-    for (const [tool, args] of [['read', { page: 'p1' }], ['click', { page: 'p1', selector: '@1' }], ['search', { query: 'example' }]] as const) {
+    cfg.allowPageScripts = true;
+    for (const [tool, args] of [['read', { page: 'p1' }], ['click', { page: 'p1', selector: '@1' }],
+      ['search', { query: 'example' }], ['evaluate', { page: 'p1', expression: 'document.title' }]] as const) {
       expect(await rawCall(tool, args, fork)).toMatchObject({ failed: true, text: expect.stringContaining('Use this tool in the main session') });
     }
     expect(browser.calls).toHaveLength(callCount);

@@ -25,6 +25,7 @@ export const EGO_TOOL_DECLS: readonly ToolSpec[] = [
   tool('press', 'Send a key to an element. Returns a snapshot.', { page, selector: element, key: text('Key or chord, e.g. Enter or ControlOrMeta+A.') }, ['page', 'selector', 'key']),
   tool('scroll', 'Scroll vertically at a viewport position in CSS pixels. Returns a snapshot.', { page, deltaY: { type: 'number' }, x: { type: 'number' }, y: { type: 'number' } }, ['page', 'deltaY']),
   tool('wait', 'Wait in the host while video sampling continues.', { seconds: { type: 'number', minimum: 0, maximum: 60 } }, ['seconds'], true),
+  tool('evaluate', 'Run JavaScript in a managed page and return JSON. Requires the operator to enable page scripts. Page-only APIs. Use ego_wait for delays; evaluation is limited to about 15 seconds.', { page, expression: text('JavaScript expression or function expression.') }, ['page', 'expression']),
   tool('shot', 'Capture the viewport as an image attachment.', { page }, ['page'], true),
   tool('close', 'Close a bot-created page. Stops watching that page.', { page }, ['page']),
   tool('handoff', 'Give the operator control and stop commands and watching.', {}, []),

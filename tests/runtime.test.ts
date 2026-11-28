@@ -37,11 +37,17 @@ beforeEach(async () => {
   vi.stubGlobal('taskSpace', async () => task);
 });
 afterEach(async () => { vi.unstubAllGlobals(); if (!dir.startsWith(join(process.cwd(), '.test-data-'))) throw new Error('Unsafe cleanup'); await rm(dir, { recursive: true, force: true }); });
-it('rejects the removed evaluate operation before calling the browser evaluator', async () => {
-  page.evaluate = vi.fn();
-  const result = await execute({ operation: 'evaluate', args: { page: 'p1', expression: 'document.title' } });
-  expect(result.error).toContain('Unsupported operation');
+it('requires explicit opt-in before touching the Space and evaluates in the managed page when allowed', async () => {
+  const findSpace = vi.fn(async () => task);
+  vi.stubGlobal('taskSpace', findSpace);
+  page.evaluate = vi.fn(async () => 'Fixture title');
+  const args = { page: 'p1', expression: 'document.title' };
+  expect(await execute({ operation: 'evaluate', args })).toMatchObject({ code: 'EGO_PAGE_SCRIPTS_DISABLED', uncertain: false });
+  expect(await execute({ operation: 'evaluate', args: { ...args, allowPageScripts: 'true' } })).toMatchObject({ code: 'EGO_PAGE_SCRIPTS_DISABLED', uncertain: false });
+  expect(findSpace).not.toHaveBeenCalled();
   expect(page.evaluate).not.toHaveBeenCalled();
+  expect(await execute({ operation: 'evaluate', args: { ...args, allowPageScripts: true } })).toEqual({ spaceId: 1, value: 'Fixture title' });
+  expect(page.evaluate.mock.calls).toEqual([[args.expression]]);
 });
 it('resolves the page target before restoring a minimized window, then uses official screenshot', async () => {
   const result = await execute({ operation: 'shot', args: { page: 'p1', restoreMinimized: true, screenshotFile: join(dir, 'shot.png') } });

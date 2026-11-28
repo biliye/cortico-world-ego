@@ -136,9 +136,9 @@ windows('requires authenticated readiness and does not launch or overwrite logs 
   expect((await readEndpoint(helperDir)).pid).toBe(endpoint.pid);
   expect(await readFile(join(helperDir, 'helper.stderr.log'), 'utf8')).toBe(originalLog);
 });
-windows('refuses to reuse a running protocol 2 helper and starts the new helper after authenticated stop', async () => {
+windows('refuses to reuse a running protocol 3 helper and starts the new helper after authenticated stop', async () => {
   const oldBundle = join(root, 'legacy-helper.mjs');
-  await writeHelperFixture(oldBundle, 2);
+  await writeHelperFixture(oldBundle, 3);
   await writeHelperFixture(bundle, HELPER_PROTOCOL);
   const legacy = spawn(process.execPath, [oldBundle, '--dir', helperDir], { windowsHide: true, stdio: 'ignore' });
   try {

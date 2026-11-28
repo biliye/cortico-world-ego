@@ -20,6 +20,9 @@ function isPlaybackSpaceFailure(error) {
   return /^EGO_TASK_(SPACE_|HOST_)/.test(errorCode(error) ?? '');
 }
 export async function execute({ operation, args }) {
+  if (operation === 'evaluate' && args.allowPageScripts !== true) {
+    return { error: 'Page JavaScript is disabled in the Ego settings.', code: 'EGO_PAGE_SCRIPTS_DISABLED', uncertain: false };
+  }
   let task;
   try {
     const checkPlayback = operation === 'tabs' && Array.isArray(args.playback);
@@ -96,6 +99,9 @@ export async function execute({ operation, args }) {
         case 'download': value = await downloadFile(task, page, args); break;
         case 'press': await page.press(args.selector, args.key); value = await page.snapshot(); break;
         case 'scroll': await page.mouse.move(args.x ?? 500, args.y ?? 400); await page.mouse.wheel(0, args.deltaY, { label: 'scroll page content' }); value = await page.snapshot(); break;
+        case 'evaluate':
+          if (typeof args.expression !== 'string' || !args.expression.trim()) throw new Error('expression must be a non-empty string.');
+          value = await page.evaluate(args.expression); break;
         case 'shot': {
           value = { ...(await capturePage(task, page, args)), url: await page.url() }; break;
         }

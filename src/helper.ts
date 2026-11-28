@@ -8,7 +8,7 @@ import { CliBridge, type EgoBridge } from './bridge.ts';
 import { HELPER_PROTOCOL, HelperBridge } from './helper-bridge.ts';
 import { isElevated } from './permissions.ts';
 export { isElevated } from './permissions.ts';
-const OPERATIONS = new Set(['connect', 'resume', 'control-status', 'tabs', 'handoff', 'finish', 'open', 'read', 'navigate', 'click', 'fill', 'press', 'scroll', 'shot', 'close', 'video', 'bilibili', 'upload', 'download']);
+const OPERATIONS = new Set(['connect', 'resume', 'control-status', 'tabs', 'handoff', 'finish', 'open', 'read', 'navigate', 'click', 'fill', 'press', 'scroll', 'evaluate', 'shot', 'close', 'video', 'bilibili', 'upload', 'download']);
 async function body(req: IncomingMessage): Promise<string> {
   req.setEncoding('utf8');
   let result = '';
@@ -45,6 +45,9 @@ export async function startHelper(options: { dir: string; cliFile?: string; time
       if (!req.headers['content-type']?.startsWith('application/json')) return reply(415, { error: 'JSON required' });
       const request = JSON.parse(await body(req));
       if (!OPERATIONS.has(request.operation) || !request.args || typeof request.args !== 'object' || Array.isArray(request.args)) return reply(400, { error: 'Unsupported operation or arguments' });
+      if (request.operation === 'evaluate' && request.args.allowPageScripts !== true) {
+        return reply(200, { error: 'Page JavaScript is disabled in the Ego settings.', code: 'EGO_PAGE_SCRIPTS_DISABLED', uncertain: false });
+      }
       const backgroundRead = (request.operation === 'video' && request.args.action === 'watch-enrichment')
         || (request.operation === 'tabs' && Array.isArray(request.args.playback));
       // A dropped background read can be cancelled without interrupting an operator command.

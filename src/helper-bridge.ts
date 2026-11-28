@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import type { BridgeReceipt, EgoBridge } from './bridge.ts';
 import { normalizeFailure } from './failures.ts';
 import { isElevated } from './permissions.ts';
-export const HELPER_PROTOCOL = 3;
+export const HELPER_PROTOCOL = 4;
 export type HelperStatus = 'offline' | 'ready' | 'incompatible';
 export interface HelperEndpoint { protocol: number; port: number; token: string; pid: number }
 export async function readEndpoint(dir: string): Promise<HelperEndpoint> {

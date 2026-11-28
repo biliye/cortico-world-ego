@@ -27,6 +27,7 @@ export const EGO: WorldDefinition<EgoConfigSection> = {
       ego_press: { zh: '向元素发送按键。', en: 'Send keys to an element.' },
       ego_scroll: { zh: '滚动网页。', en: 'Scroll a page.' },
       ego_wait: { zh: '在宿主等待，不执行页面脚本或阻塞视频采样。', en: 'Wait in the host without page evaluation or blocking video sampling.' },
+      ego_evaluate: { zh: '用户开启后，可在受管网页中使用该页的登录态执行任意 JavaScript。默认关闭。', en: 'Run arbitrary JavaScript with the managed page’s signed-in access when enabled by the operator. Off by default.' },
       ego_shot: { zh: '获取网页当前视口的图片附件。', en: 'Capture the page viewport as an attachment.' },
       ego_close: { zh: '关闭 bot 创建的页面。', en: 'Close an agent-created page.' },
       ego_handoff: { zh: '将 Space 交给操作员并停止操作。', en: 'Hand control to the operator and stop commands.' },

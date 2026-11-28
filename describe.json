@@ -344,6 +344,36 @@
       }
     },
     {
+      "name": "ego_evaluate",
+      "description": "Run JavaScript in a managed page and return JSON. Requires the operator to enable page scripts. Page-only APIs. Use ego_wait for delays; evaluation is limited to about 15 seconds. Browser data arrives in the matching external ego.result event.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "page": {
+            "type": "string",
+            "description": "Page label, e.g. p1."
+          },
+          "expression": {
+            "type": "string",
+            "description": "JavaScript expression or function expression."
+          }
+        },
+        "required": [
+          "page",
+          "expression"
+        ]
+      },
+      "tags": [
+        "act",
+        "snapshot"
+      ],
+      "summary": {
+        "zh": "用户开启后，可在受管网页中使用该页的登录态执行任意 JavaScript。默认关闭。",
+        "en": "Run arbitrary JavaScript with the managed page’s signed-in access when enabled by the operator. Off by default."
+      }
+    },
+    {
       "name": "ego_shot",
       "description": "Capture the viewport as an image attachment. Browser data arrives in the matching external ego.result event.",
       "parameters": {
